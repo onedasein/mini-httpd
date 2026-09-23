@@ -42,9 +42,13 @@ wrk -t4 -c100 -d30s --latency http://127.0.0.1:8080/index.html
 ```
 mini-httpd/
 ├── TASKS.md      # 任务分解（唯一的进度看板）
+├── bench.sh      # 压测脚本：固定参数、自动起服务、结果落盘（见 M4）
 ├── src/          # 源码（现在是骨架）
 ├── www/          # 被测的静态文件根目录
-├── docs/         # env.md（环境笔记）、bench.md（压测数据）
+├── docs/
+│   ├── env.md    # 环境笔记（T0.1）
+│   ├── bench.md  # 压测与优化记录（T4.x）
+│   └── bench/    # 每次压测的原始输出 + results.tsv
 └── build/        # 编译产物（已 gitignore）
 ```
 

@@ -142,9 +142,12 @@
 ## M4 · 压测与第一轮优化（周 5–6，10h）
 
 - [ ] **T4.1 建立基准并记录环境**（2h）
-  - `wrk -t4 -c100 -d30s --latency http://127.0.0.1:8080/index.html`，把 QPS/P50/P99、CPU、内核版本（`uname -r`）、编译目标（release）写进 `docs/bench.md`
+  - 直接跑 **`bash bench.sh baseline`**：脚本会自动 `make release` → 起服务 → 预热 → 跑
+    `wrk -t4 -c100 -d30s --latency` → 记录内核/CPU/提交号 → 汇总追加到 `docs/bench/results.tsv`
+  - 把那一行填进 `docs/bench.md` 的环境表与结果总表
 - [ ] **T4.2 找瓶颈**（3h）
   - WSL2 上 `perf` 不可用 → 用 **`strace -c`** 看系统调用分布、`valgrind --tool=callgrind` 看函数热点
+  - 省事做法：`bash bench.sh -s <标签>` 会在压测的同时抓一张 `strace -c` 表
   - ✅ 写下 top3 热点 + 证据（截图或命令输出）
 - [ ] **T4.3 优化一：`sendfile(2)` 或 `writev`**（2h）
   - 把响应头与文件体一次发出，省掉「读进用户态再写出」的一次拷贝
@@ -153,7 +156,9 @@
   - 连接对象用固定池或 `realloc` 一次到位；响应头用栈上缓冲拼装
   - ✅ 压测再跑一次，QPS 或 P99 有可解释的变化
 - [ ] **T4.5 优化前后对比表**（1h）
-  - `wrk` 前后 QPS/P50/P99 + `strace -c` 前后 syscall 数 → **这就是 README 要的那张表**
+  - 数据都在 `docs/bench/results.tsv`（一行一次）与各自的 `<日期>-<标签>.txt` 原始输出里
+  - 按 `docs/bench.md` 的模板填「结果总表 + syscall 对比 + 每轮假设/结论」，再把结论表搬进 README
+  - **纪律**：只比同机同编译目标、参数不许中途改、看 P99 不看平均值
 
 ---
 
