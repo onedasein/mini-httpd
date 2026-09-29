@@ -8,7 +8,7 @@ BIN     = mini-httpd
 SRC     = $(wildcard src/*.c)
 WARN    = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes
 
-.PHONY: all debug release asan run clean
+.PHONY: all debug release asan tsan run clean
 
 all: debug
 
