@@ -6,38 +6,14 @@
 #include <sys/types.h>
 #define MAXARGS 128
 #define MAXLINE 1024
-// eval - Evaluate a command line
-void eval(char* cmdline) {
-    char* argv[MAXARGS]; // Argument list execve()
-    char buf[MAXLINE];   // Holds modified command line
-    int bg;              // Should the job run in bg or fg?
-    pid_t pid;           // Process id
-
-    strcpy(buf, cmdline);
-    bg = parseline(buf, argv);
-    if (argv[0] == NULL) return;         // Ignore empty lines
-    if (!builtin_command(argv)) {
-        if ((pid = fork()) == 0) { // Child runs user job
-            if (execve(argv[0], argv, environ) < 0) {
-                printf("%s: Command not found.\n", argv[0]);
-            }
-        }
-
-        // Parent waits for foreground job to terminate
-        if (!bg) {
-            int status;
-            if (waitpid(pid, &status, 0) < 0) unix_error("waitfg: waitpid error");
-        } else
-            printf("%d %s", pid, cmdline);
-    }
-    return;
-}
 
 int parseline(char* buf, char** argv) {
     char* delim;                       // Points to first space delimiter
     int argc;                          // Number of args
+    int bg;
 
-    buf[strlen(buf) - 1] = ' ';        // Replace trailing '\n' with space
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') buf[len-1] = ' ';        // Replace trailing '\n' with space
     while (*buf && (*buf == ' ')) buf++;
 
     // Build the argv list
@@ -54,8 +30,11 @@ int parseline(char* buf, char** argv) {
     if (argc == 0)                  // Ignore blank line
         return 1;
 
-    if ((bg = (*argv[argc - 1] == '&')) != 0) argv[--argc] = NULL;
-
+    if (!strcmp(argv[argc-1], "&")) {
+        argv[--argc] = NULL;
+        bg = 1;
+    } else
+        bg = 0;
     return bg;
 }
 
@@ -66,3 +45,32 @@ int builtin_command(char** argv) {
         return 1;
     return 0;                       // Not a builtin command
 }
+// eval - Evaluate a command line
+void eval(char* cmdline) {
+    char* argv[MAXARGS]; // Argument list execve()
+    char buf[MAXLINE];   // Holds modified command line
+    int bg;              // Should the job run in bg or fg?
+    pid_t pid;           // Process id
+
+    strcpy(buf, cmdline);
+    bg = parseline(buf, argv);
+    if (argv[0] == NULL) return;         // Ignore empty lines
+    if (!builtin_command(argv)) {
+        if ((pid = fork()) == 0) { // Child runs user job
+            if (execvp(argv[0], argv) < 0) {
+                printf("%s: Command not found.\n", argv[0]);
+                exit(1);
+            }
+        }
+
+        // Parent waits for foreground job to terminate
+        if (!bg) {
+            int status;
+            if (waitpid(pid, &status, 0) < 0) perror("waitfg: waitpid error");
+        } else
+            printf("%d %s", (int)pid, cmdline);
+    }
+    return;
+}
+
+
