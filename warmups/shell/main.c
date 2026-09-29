@@ -1,7 +1,7 @@
+// fgets && call eval_job
 #include "shell.h"
 #include <stdio.h>
 #include <stdlib.h>
-#define MAXLINE 1024
 int main() {
     char cmdline[MAXLINE]; // Command line
 
