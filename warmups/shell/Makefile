@@ -1,8 +1,15 @@
+CC ?= gcc
 SRC = $(wildcard *.c)
+TARGET = build/debug/shell
+
+.PHONY: all debug clean
+
 all: debug
 
-debug:
-	@mkdir -p build/debug
-	gcc -o build/debug/shell $(SRC)
+debug: $(TARGET)
+
+$(TARGET): $(SRC)
+	@mkdir -p $(dir $@)
+	$(CC) -o  $@ $^
 clean:
-	rm -rf build
+	rm -rf build	
