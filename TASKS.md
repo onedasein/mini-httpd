@@ -44,10 +44,16 @@
   - 骨架已就绪：`make debug && ./build/debug/mini-httpd`
   - ✅ 三个目标（debug / release / asan）都能编出二进制；`git log` 有一次提交
   - 学到：Makefile 的变量、`.PHONY`、为什么 release 和 debug 要分开编
-- [ ] **T0.3 最小 TCP echo server**（2h）
+  - ⚠ **2026-10-06 复核未通过**：`src/` 与 `lib/` 目前是空目录，git 也没有跟踪任何 `src/*.c`，
+    根 `make debug` 直接报 `cc: fatal error: no input files`；`build/*/mini-httpd` 是 9/23–9/28 的陈旧产物。
+    本项要等 M1 源码落地后重新验收。
+- [x] **T0.3 最小 TCP echo server**（2h）— 2026-10-06 完成：`warmups/echo/`（代码 + 概念图 + `README.md` 坑列表 + `tests/run.sh` 10 条回归全绿）
   - blocking socket：`socket → bind → listen → accept → read → write`，一次只伺候一个连接
-  - ✅ `printf 'hi\n' | nc 127.0.0.1 8080` 能回显
-  - 学到：`sockaddr_in`、`htons`、`SO_REUSEADDR`（不加它重启会 `EADDRINUSE`）
+  - ✅ `printf 'hi\n' | nc -N 127.0.0.1 8080` 能回显（本机 `nc` 是 OpenBSD 版，**必须 `-N`**：否则 stdin EOF 后两边互等，管道永久挂死，实测 `timeout 2` 收尾 exit=124）
+  - ✅ 10000 字节被读成 4096 / 4096 / 1808 三次（短读现场），回显与源文件 `cmp` 完全一致
+  - 学到：`sockaddr_in`、`htons`、`SO_REUSEADDR`
+  - ★★ **修正**「不加 `SO_REUSEADDR` 重启就 `EADDRINUSE`」：这个 echo 上**复现不出来**。常规会话结束后 TIME_WAIT 落在**客户端**临时端口；要复现必须让服务端当主动关闭方，而且 `SO_REUSEADDR` 只对「旧 socket 自己也带该选项」的 TIME_WAIT 放行（accepted socket 会从 listener 继承）。双向对照见 `warmups/echo/tests/run.sh` ③
+  - ★ **修正**「不忽略 SIGPIPE 会被信号干掉」：本 echo 在 `SIG_DFL` 下 **0/20 被杀** —— 它「一次 read 一次 write」，EOF 之后最多只剩一次 write（成功），碰不到第二次 write 的 EPIPE。机制用最小复现钉死（无 `SIG_IGN` → exit 141；`SIG_IGN` → 存活），**M1/M2 仍必须做 `MSG_NOSIGNAL` / `SIG_IGN`**（HTTP 由服务端自己决定何时写 body，那时才会中招）
 - [ ] **T0.4 热身 ①：mini shell**（2h，路线图 C 第 4 阶段验收）
   - 支持管道 `|` 与重定向 `>`，用 `fork` + `execvp` + `waitpid`
   - ✅ 在你自己写的 shell 里 `ls | wc -l > out.txt` 结果正确
@@ -62,28 +68,34 @@
 ## M1 · 阻塞式 HTTP：先把「协议」做对（周 3 上半，10h）
 
 > 这一阶段**故意不用 epoll**——先把 HTTP 语义、缓冲、错误码做对，后面换成事件循环时才有对照组。
+>
+> **2026-10-06 完成**：`warmups/httpd/v1/`（885 行：`main.c` / `http.c,h` / `file.c,h` / `httpd.h`）
+> `bash tests/run.sh` → **55/55**（debug 与 ASan+UBSan+LeakSanitizer 双跑），valgrind `0 errors` + `All heap blocks were freed`。
+> 审查报告 `warmups/httpd/docs/03-审查报告.md`，总结 `04-M1总结.md`，速查 `02-man与RFC速查.md`。
 
-- [ ] **T1.1 观察真实报文**（0.5h）
+- [x] **T1.1 观察真实报文**（0.5h）— strace 抓到内核侧真实字节：请求 `recvfrom(...) = 92`（`GET / HTTP/1.1\r\nHost: …\r\n\r\n`）、响应头 `sendto(..., MSG_NOSIGNAL) = 137`
   - `nc -l 8080` 占住端口，用 `curl -v` 打过去，把原始字节看清楚（每行结尾是 `\r\n`）
   - ✅ 能把自己的请求报文原样打印出来（含不可见字符，用 `od -c` 或 `%q` 打印）
-- [ ] **T1.2 请求行解析 + 固定响应**（2h）
+- [x] **T1.2 请求行解析 + 固定响应**（2h）— `GET /` → 200，body 是 `www/index.html`（408B），响应行 CRLF 结尾
   - 解析 `METHOD SP PATH SP VERSION CRLF`，返回固定 body
   - ✅ `curl -i http://127.0.0.1:8080/` 同时看到状态行与 body
-- [ ] **T1.3 headers 解析成结构 + 上限防护**（2h）
+- [x] **T1.3 headers 解析成结构 + 上限防护**（2h）— 单行 20000B → **431**；总量 70KB → **431**；URI 2500B → **414**；`Content-Length: 9999999` → 413；`hOsT` / `cOnNeCtIoN: CLOSE` 大小写不敏感；重复同名 header 允许
   - 大小写不敏感（`Connection` / `connection`）、允许多个同名 header、**单行 ≤ 8KB、总量 ≤ 64KB**，超了就 431/400
-  - ✅ `printf 'GET / HTTP/1.1\r\nX: %s\r\n\r\n' "$(head -c 20000 /dev/zero | tr '\0' a)" | nc 127.0.0.1 8080` 不会崩、不越界
-  - 学到：为什么不能对二进制/未信任输入用 `strcpy`/`strcat`（用长度 + `memchr`）
-- [ ] **T1.4 静态文件服务 + 路径安全**（3h）
+  - ✅ 20000 字节的单行 header 不崩、不越界（ASan 版跑同一套全绿）
+  - 学到：为什么不能对二进制/未信任输入用 `strcpy`/`strcat`（用长度 + `memchr`）——全仓库 `grep` 无一处 `strcpy/strcat/sprintf`
+  - ★ 附带踩坑：`next_line` 吃掉 `\r` 却没回退行尾指针 → **所有 CRLF 请求被误判 400、裸 LF 反而 200**。见 `03-审查报告.md` B1
+- [x] **T1.4 静态文件服务 + 路径安全**（3h）— 路径穿越 `--path-as-is /../Makefile` → **400 且不泄漏内容**；`%2e%2e%2f`、`..%2f`、`%00` → 400；指向 `/etc/passwd`、`../Makefile` 的符号链接 → **403**；www 内正常软链 → 200；目录无 index → 404
   - 把 URL path 映射到 `./www` 下的文件；`Content-Type` 用一张小表（html/css/js/png/jpg/txt/json）
-  - **必须挡住** `..`（先做前缀归一化或用 `realpath()` 校验结果仍以 `www/` 开头）
+  - **必须挡住** `..`（先做前缀归一化或用 `realpath()` 校验结果仍以 `www/` 开头）——两条都做了（`file.c` 双保险）
   - ✅ `curl --path-as-is 'http://127.0.0.1:8080/../Makefile'` 返回 400/404 **而不是** Makefile 内容
   - ✅ `curl -I http://127.0.0.1:8080/index.html` 的 `Content-Type`/`Content-Length` 正确
-- [ ] **T1.5 完整写 + 部分写**（1.5h）
+- [x] **T1.5 完整写 + 部分写**（1.5h）— 10MB `cmp` 一致；把客户端 `SO_RCVBUF` 压到 4096 并间歇停读，逼出「部分写/EAGAIN/POLLOUT」路径，仍是 `10485760/10485760`
   - `write()` 返回值可能小于请求长度，必须循环写完
   - ✅ `curl -o out.bin http://127.0.0.1:8080/big.bin` 后 `cmp` 与源文件一致（自己造一个 10MB 文件）
-- [ ] **T1.6 HTTP 语义细节**（1h）
+- [x] **T1.6 HTTP 语义细节**（1h）— `HEAD` 只发 137 字节头（Content-Length 仍为 408）；`PUT`/`DELETE` → 405 + `Allow: GET, HEAD`；缺 `Host` 的 1.1 → 400；`HTTP/2.0` → 505；裸 LF 行尾宽容接受
   - `HEAD` 不返回 body；非法方法 → 405；HTTP/1.0 默认短连接；`Connection: close` 立即断开
   - ✅ 四条各用 `curl -I/-X` 手工验一遍
+  - 注：keep-alive 按计划留给 **T2.6**（v1 一律 `Connection: close`）
 
 ---
 
@@ -207,8 +219,8 @@
 
 | 里程碑 | 计划 | 实际 | 备注（卡在哪、怎么解决） |
 |---|---|---|---|
-| M0 | 8h | | |
-| M1 | 10h | | |
+| M0 | 8h | 进行中 | 2026-10-06：T0.3 完成（`warmups/echo`：echo + 概念图 + 10 条回归全绿，4 个坑都有可复现命令）；T0.2 复核未通过（`src/` 为空、根构建编不动）；T0.4/T0.5 产物在 `warmups/` 但本次未复核 |
+| M1 | 10h | v1 完成 | 2026-10-06：`warmups/httpd/v1`（885 行）落地，`tests/run.sh` **55/55**（debug + ASan/LSan），valgrind 0 error / 0 leak；修掉 1 个真 bug（CRLF 解析让所有正常请求 400）；keep-alive 按计划留给 T2.6；M2 的靶子（慢客户端拖死全服）已复现并留证 |
 | M2 | 14h | | |
 | M3 | 9h | | |
 | M4 | 10h | | |
