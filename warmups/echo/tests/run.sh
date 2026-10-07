@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # tests/run.sh — warmups/echo（M0/T0.3）回归测试
-#   bash tests/run.sh                          # 测 build/debug/echo_server
-#   bash tests/run.sh ./build/release/echo_server
+#   bash tests/run.sh                          # 测 build/debug/server
+#   bash tests/run.sh ./build/release/server
 #
 # 覆盖：基本回显 / 短读+字节一致 / SO_REUSEADDR 双向对照 / SIGPIPE 最小复现 / SIGPIPE 杀不掉（已知结论）
 set -u
 set -o pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=${1:-$ROOT/build/debug/echo_server}
+BIN=${1:-$ROOT/build/debug/server}
 TMO=${TMO:-10}
 PBASE=${PBASE:-8800}
 
@@ -70,8 +70,8 @@ stop_srv
 
 echo "---- ③ SO_REUSEADDR 双向对照 ----"
 # 造一个落在服务端端口上的 TIME_WAIT：连上一条连接，kill -9 服务端（内核替它发 FIN），客户端再关
-sed 's/^#if 1$/#if 0/' "$ROOT/echo_server.c" > "$work/noreuse.c"
-gcc -std=c11 -O0 -g -o "$work/noreuse" "$work/noreuse.c" 2>"$work/gcc.log" \
+# -DNO_REUSEADDR 关掉源码里的 setsockopt（别再 sed 源码文本：源码一改，sed 会**静默**不匹配）
+gcc -std=c11 -O0 -g -DNO_REUSEADDR -o "$work/noreuse" "$ROOT/server.c" 2>"$work/gcc.log" \
     || bad "编译 noreuse 变体" "$(cat "$work/gcc.log")"
 P3=$((PBASE+2))
 start_srv "$BIN" $P3          # 用带 SO_REUSEADDR 的正式产物，让 TIME_WAIT 继承该选项
