@@ -1,5 +1,5 @@
 CC ?= gcc
-SRC := $(wildcard *.c)
+SRC := $(wildcard src/*.c)
 BIN := server
 WARN    := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion \
            -Wmissing-prototypes -Wstrict-prototypes \
