@@ -34,6 +34,35 @@
 
 ---
 
+## 2. 测试分层约定（2026-10-08 起）
+
+每个 warmup 目录内部统一三个入口，命名一致，后续 httpd/v1、shell 也照这个来：
+
+| 目标 | 含义 | 速度 |
+|---|---|---|
+| `make test` | **单元测试**：一个被测模块一个 `tests/unit/test_*.c`，文件里多个测试函数；进程内直接调用被测函数并断言 | 毫秒级 |
+| `make e2e` | **端到端**：起完整二进制、走网络，`tests/e2e/run.sh` 负责调度与比对 | 秒级 |
+| `make check` | `test` + `e2e`（提交前 / CI 用） | — |
+
+每个目标都有 `-asan` 变体（`test-asan` / `e2e-asan`），发布前双跑。根 `Makefile` 里
+`make test` / `make e2e` / `make check` / `make test-asan` / `make e2e-asan` 只做转发。
+
+落地要点（踩过才知道）：
+
+- 被测逻辑必须从 `main` 拆出来、编成**不含 main** 的对象：
+  `LIB_SRC := $(filter-out src/main.c, $(wildcard src/*.c))`，否则链接测试程序会 duplicate symbol；
+- 被测函数**失败要返回错误码，不要 `exit()`**，否则一条用例会把整个测试进程带走；
+- 「脚本 + 传参 + 比对」属于 E2E，不是单元测试；两者互补，不是替代；
+- 第三方框架 vendor 进 `tests/unit/unity/`（版本记在 `tests/unit/unity/.VERSION`），
+  **单独用 `-w` 编译**，别套本仓库的严格告警；测试文件加 `-Wno-missing-prototypes`（否则 `setUp`/`tearDown` 刷屏）；
+- 用例名用 ASCII —— Unity 的 `TEST_ASSERT_*_MESSAGE` 会把非 ASCII 转义成 `\xNN`，中文会变乱码，中文写注释；
+- 空套件不许报「全部通过」：`make test` 里先挡住「一个 `test_*.c` 都没找到」的情况。
+
+**已分层**：`warmups/echo`。**尚未分层**：`warmups/echo_pre`、`warmups/httpd/v1`、`warmups/shell`
+（它们的 `test` 目前仍是脚本回归，列入根 `WARMUPS` 但不在 `WARMUPS_E2E`）。
+
+---
+
 ## M0 · 环境与热身（周 1–2，8h）
 
 - [ ] **T0.1 工具链自检与补齐**（1h）
@@ -48,6 +77,9 @@
     根 `make debug` 直接报 `cc: fatal error: no input files`；`build/*/mini-httpd` 是 9/23–9/28 的陈旧产物。
     本项要等 M1 源码落地后重新验收。
 - [x] **T0.3 最小 TCP echo server**（2h）— 2026-10-06 完成：`warmups/echo/`（代码 + 概念图 + `README.md` 坑列表 + `tests/run.sh` 回归全绿；2026-10-07 重写为 `server.c`，补齐 argv/<ip> <port> 与 `dump_bytes` 日志后 11 条全绿，debug + ASan 双跑）
+  - ★ **2026-10-08 重构为分层结构**：`server.c` 拆成 `src/{main,parse,dump}.{c,h}` —— `parse_args` 解析 `<ip> <port>` 且**失败返回 -1、不 `exit`**；`format_bytes` 是纯函数（snprintf 式截断语义）+ `dump_bytes` 是 I/O 薄壳。测试分两层：`tests/unit/`（Unity v2.7.0 vendored，**6 个测试函数 / 32 行表驱动用例**）与 `tests/e2e/run.sh`（原脚本挪位，顺手修了 `ROOT` 少算一级的路径）。单元与 E2E 各 debug+ASan 双跑，**四条全绿**；目标名与落地要点见上面「测试分层约定」。
+  - ⚠ 上面「11 条全绿」记的是 2026-10-07 那版 `tests/run.sh`；当前脚本只留 1 条回显断言，11 条那版仅存在于 git 历史 `8dfb04e`。
+  - 学到：`$(filter-out src/main.c, ...)` 出库，测试才能直接链接被测模块（库里有 main 就 duplicate symbol）；`strtol` 会跳过前导空白、接受 `+`/`-`，所以 `" 80"` 被容忍而 `"80 "` 被 `*end != '\0'` 挡住；`snprintf` 的返回值是「本该写入的长度」，截断判断必须拿它跟 `cap` 比而不是看写了多少；空套件报「全部通过」是最危险的假绿。
   - blocking socket：`socket → bind → listen → accept → read → write`，一次只伺候一个连接
   - ✅ `printf 'hi\n' | nc -N 127.0.0.1 8080` 能回显（本机 `nc` 是 OpenBSD 版，**必须 `-N`**：否则 stdin EOF 后两边互等，管道永久挂死，实测 `timeout 2` 收尾 exit=124）
   - ✅ 10000 字节被读成 4096 / 4096 / 1808 三次（短读现场），回显与源文件 `cmp` 完全一致

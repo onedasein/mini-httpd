@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# tests/run.sh
+# tests/e2e/run.sh —— 端到端：起完整二进制、走网络、脚本比对
 set -u 
 set -o pipefail
 set -x # 显示命令，方便学习
 
-# 找到仓库根目录
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# 找到 warmup 根目录（本脚本在 tests/e2e/ 下，所以是上两级）
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 BIN=${1:-$ROOT/build/debug/server}
 
 # 检查程序存在且可执行
