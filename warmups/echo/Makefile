@@ -1,12 +1,8 @@
 # echo 热身（T0.3）— 最小 TCP echo server
-#
-#   产品二进制
 #   make debug / release / asan     三个目标各自产出独立二进制
 #   make run                        编（增量）+ 跑，默认 127.0.0.1 8080
 #   make run ARGS="127.0.0.1 9090"  换参数
 #   make gdb / make run-asan        调试用
-#
-#   测试分两层（分层理由见 README「测试分层」）
 #   make test       单元测试：进程内直接调用 parse/dump 的函数，毫秒级
 #   make e2e        端到端回归：起进程、走网络，跑 tests/e2e/run.sh
 #   make check      test + e2e（提交前 / CI 用）
