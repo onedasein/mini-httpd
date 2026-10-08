@@ -1,6 +1,8 @@
 # M1 · 阻塞式 HTTP 静态服务器（v1）—— 故意不优雅，当 M2 的对照组
 #   make debug / release / asan   三个目标各自产出独立二进制
 #   make run                      编译并在 127.0.0.1:8080 起服务
+#   make test                     编 debug 版 + 跑 tests/run.sh 的验收套件
+#   make test-asan                编 ASan 版 + 跑同一套（发布前必做）
 #
 # 源文件计划（M1）：main.c（listener + accept 串行循环）、http.c/http.h（增量解析 + 响应拼装）、
 #                   httpd.h（常量与上限）、file.c（静态文件 + 路径校验）
@@ -13,7 +15,7 @@ WARN    := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion \
            -Werror=implicit-function-declaration
 LDLIBS  :=
 
-.PHONY: all debug release asan clean run guard
+.PHONY: all debug release asan clean run guard test test-asan
 
 all: debug
 
@@ -37,8 +39,18 @@ asan: guard
 	$(CC) $(WARN) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
 	      -o build/asan/$(BIN) $(SRC) $(LDLIBS)
 
+# 程序收 <ip> <port> <www根目录>，所以这里必须给全（只写 8080 会被当成 ip）
+ARGS    ?= 127.0.0.1 8080 www
+
 run: debug
-	./build/debug/$(BIN) 8080
+	./build/debug/$(BIN) $(ARGS)
+
+# tests/run.sh 收二进制路径作为 $1，所以同一套断言能在 debug / asan 上双跑
+test: debug
+	bash ./tests/run.sh
+
+test-asan: asan
+	bash ./tests/run.sh ./build/asan/$(BIN)
 
 clean:
 	rm -rf build

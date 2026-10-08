@@ -47,7 +47,7 @@
   - ⚠ **2026-10-06 复核未通过**：`src/` 与 `lib/` 目前是空目录，git 也没有跟踪任何 `src/*.c`，
     根 `make debug` 直接报 `cc: fatal error: no input files`；`build/*/mini-httpd` 是 9/23–9/28 的陈旧产物。
     本项要等 M1 源码落地后重新验收。
-- [x] **T0.3 最小 TCP echo server**（2h）— 2026-10-06 完成：`warmups/echo/`（代码 + 概念图 + `README.md` 坑列表 + `tests/run.sh` 10 条回归全绿）
+- [x] **T0.3 最小 TCP echo server**（2h）— 2026-10-06 完成：`warmups/echo/`（代码 + 概念图 + `README.md` 坑列表 + `tests/run.sh` 回归全绿；2026-10-07 重写为 `server.c`，补齐 argv/<ip> <port> 与 `dump_bytes` 日志后 11 条全绿，debug + ASan 双跑）
   - blocking socket：`socket → bind → listen → accept → read → write`，一次只伺候一个连接
   - ✅ `printf 'hi\n' | nc -N 127.0.0.1 8080` 能回显（本机 `nc` 是 OpenBSD 版，**必须 `-N`**：否则 stdin EOF 后两边互等，管道永久挂死，实测 `timeout 2` 收尾 exit=124）
   - ✅ 10000 字节被读成 4096 / 4096 / 1808 三次（短读现场），回显与源文件 `cmp` 完全一致
@@ -58,6 +58,7 @@
   - 支持管道 `|` 与重定向 `>`，用 `fork` + `execvp` + `waitpid`
   - ✅ 在你自己写的 shell 里 `ls | wc -l > out.txt` 结果正确
   - 学到：`dup2`、fd 表、`waitpid` 与僵尸进程
+  - 2026-10-07：STAGE=1 套件（10 条）已全绿（`make test`）。修掉两个真 bug：① `main.c` 用 `fgets` 后又判 `feof`，「末行没有换行符」的命令会被整个丢掉（`fgets` 命中 EOF 时**照样返回已读到的那一行**）；② `parse.c` 的分词依赖"每个 token 后面都有分隔符"，末 token 没有分隔符就被吞掉（`echo tail` 变成零参 `echo`）。管道/重定向（STAGE=2）仍未实现
 - [ ] **T0.5 热身 ②：生产者-消费者队列**（2h，路线图 C 第 5 阶段验收）
   - `pthread` + 互斥锁 + 条件变量，固定大小环形缓冲
   - ✅ `make tsan` 编译运行无数据竞争告警
@@ -219,7 +220,7 @@
 
 | 里程碑 | 计划 | 实际 | 备注（卡在哪、怎么解决） |
 |---|---|---|---|
-| M0 | 8h | 进行中 | 2026-10-06：T0.3 完成（`warmups/echo`：echo + 概念图 + 10 条回归全绿，4 个坑都有可复现命令）；T0.2 复核未通过（`src/` 为空、根构建编不动）；T0.4/T0.5 产物在 `warmups/` 但本次未复核 |
+| M0 | 8h | 进行中 | 2026-10-06：T0.3 完成（`warmups/echo`：echo + 概念图 + 回归全绿，4 个坑都有可复现命令）；T0.2 复核未通过（`src/` 为空、根构建编不动）；T0.4/T0.5 产物在 `warmups/` 但本次未复核。2026-10-07：echo 重写为 `server.c`（argv + dump_bytes + `-DNO_REUSEADDR`/`-DKEEP_SIGPIPE_DEFAULT` 开关），11 条回归 debug/ASan 双绿；`make test`/`make test-asan` 目标已加到 echo、httpd/v1、shell 与根 Makefile |
 | M1 | 10h | v1 完成 | 2026-10-06：`warmups/httpd/v1`（885 行）落地，`tests/run.sh` **55/55**（debug + ASan/LSan），valgrind 0 error / 0 leak；修掉 1 个真 bug（CRLF 解析让所有正常请求 400）；keep-alive 按计划留给 T2.6；M2 的靶子（慢客户端拖死全服）已复现并留证 |
 | M2 | 14h | | |
 | M3 | 9h | | |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/run.sh
+#tests/run.sh
 set -u 
 set -o pipefail
 set -x # 显示命令，方便学习
@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 # 启动服务端（后台跑）, 日志写到临时目录
-PORT=8080
+PORT=8800
 "$BIN" 127.0.0.1 $PORT > "$work/srv.log" 2>&1 &
 SRV=$!
 sleep 0.3 # 给一点时间bind + listen

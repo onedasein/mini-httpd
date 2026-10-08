@@ -14,13 +14,17 @@ int parseline(char* buf, char** argv) {
     while (*buf && (*buf == ' ')) buf++;
 
     // Build the argv list
+    // ★ 别依赖"末尾一定有分隔符"：末行没换行符时，最后一个 token 后面什么都没有，
+    //   老写法（只认 strchr 找到的空格）会把它整段吞掉（`echo tail` 变成零参 echo）。
     argc = 0;
-    while ((delim = strchr(buf, ' '))) {
+    while (*buf && argc < MAXARGS - 1) {    // 留一格给 argv[argc] = NULL
+        while (*buf == ' ') buf++;          // 跳过连续空格
+        if (!*buf) break;
         argv[argc++] = buf;
+        delim = strchr(buf, ' ');
+        if (!delim) break;                  // 最后一个 token：没有分隔符，到此为止
         *delim = '\0';
         buf = delim + 1;
-        while (*buf && (*buf == ' ')) // Ignore spaces
-            buf++;
     }
     argv[argc] = NULL;
 
