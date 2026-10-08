@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #define PORT     8080
 #define BUF_SIZE 4096
 int main(int argc, char* argv[]) {
@@ -59,13 +60,16 @@ int main(int argc, char* argv[]) {
                     ssize_t w = write(conn_fd, buf + written, (size_t)(n - written));
                     if (w < 0) {
                         perror("write");
-                        continue;
+                        break; // 跳过此次回显
                     }
                     written += w;
                 }
             } else if (n < 0) {
                 perror("read");
-                continue;
+                if (errno == EINTR) // 如果系统调用被信号打断，则重试。否则应当关闭连接。
+                    continue;
+                else
+                    break;
             }
         }
         close(conn_fd);
