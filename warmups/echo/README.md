@@ -12,8 +12,7 @@ src/
 └── main.c              唯一 main：解析参数 → socket/bind/listen → accept 串行回显 → close
 ```
 
-拆成三个模块不是为了好看，是为了**能被单元测试直接调用**：被测逻辑必须从 `main` 里出来，
-编成不含 `main` 的对象（`make` 里用 `filter-out src/main.c` 出库），否则链接测试程序会
+拆成三个模块是为了**能被单元测试直接调用**：被测逻辑必须从 `main` 里出来，编成不含 `main` 的对象（`make` 里用 `filter-out src/main.c` 出库），否则链接测试程序会
 duplicate symbol。原理见 `docs/02-单元测试与端到端测试.md`。
 
 # 用法
