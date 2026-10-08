@@ -2,7 +2,7 @@
 # tests/e2e/run.sh —— 端到端：起完整二进制、走网络、脚本比对
 set -u 
 set -o pipefail
-set -x # 显示命令，方便学习
+# set -x # 显示命令，方便学习
 
 # 找到 warmup 根目录（本脚本在 tests/e2e/ 下，所以是上两级）
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
