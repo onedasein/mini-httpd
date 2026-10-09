@@ -1,0 +1,2 @@
+# 第三方测试框架不计入语言统计（它们会把 C/C++ 比例整个带偏）
+warmups/*/tests/unit/unity/* linguist-vendored
