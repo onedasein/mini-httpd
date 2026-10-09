@@ -4,10 +4,9 @@
 #include <stddef.h>
 #include "parse_line.h"
 #include "execute_line.h"
-#define MAX_CMDS 32
 int main(int argc, char* argv[]) {
     struct command cmds[MAX_CMDS];
-    int ncmds;
+    int ncmds = 0;
 
     char* line = NULL;
     size_t cap = 0;
@@ -19,9 +18,15 @@ int main(int argc, char* argv[]) {
         ssize_t n = getline(&line, &cap, stdin);
         if (n < 0) break;
 
-        parse_line(line, cmds, &ncmds);
+        if (parse_line(line, cmds, &ncmds) != 0) {
+            fprintf(stderr, "parse failed, line ignored.\n");
+            continue;
+        }
 
-        execute_line(cmds, ncmds);
+        if (execute_line(cmds, ncmds) != 0) {
+            fprintf(stderr, "execute failed, try again.\n");
+            continue;
+        }
     }
 
     free(line);
