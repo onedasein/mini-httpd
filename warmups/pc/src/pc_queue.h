@@ -6,7 +6,7 @@ typedef struct {
     int *buf;
     size_t cap, head, tail, count;
     int closed;
-    pthread_mutex_t lock;
+    pthread_mutex_t lock; // 保护上面所有字段
     pthread_cond_t not_empty, not_full;
 } pc_queue;
 
