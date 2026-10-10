@@ -28,6 +28,7 @@
 | **M0** | 环境 + C 五阶段热身 | 8h | 周 1–2（环境搭建、C 第 1–5 阶段） |
 | **M1** | 阻塞式 HTTP，跑通正确性 | 10h | 周 3 上半 |
 | **M2** | epoll 非阻塞 reactor（核心） | 14h | 周 3 下半 – 周 4 |
+| **M2+** | Rust 对照实现（非路线图里程碑，见下节） | 1.5–2 天 | —（校准「C→Rust 替代」判断） |
 | **M3** | 健壮性与对抗测试 | 9h | 周 4 末 |
 | **M4** | 压测与第一轮优化 | 10h | 周 5–6 |
 | **M5** | 交付 | 4h | 周 5–6 |
@@ -157,6 +158,106 @@
 
 ---
 
+## M2+ · Rust 对照实现（M2 完成后插入，1.5–2 天）
+
+> **目的**：同一份需求、同一套黑盒验收，换语言再实现一次，把「Rust 到底省了我什么、多要了我什么」变成第一手结论，
+> 用来校准「C 能不能被 Rust 替代」这个判断（三个方向答案不同，见产出笔记第 7 条）。
+> **前置**：M2（`warmups/httpd/v2/`）完成 —— 没有 C 版作参照物，就没有「对照」可言。
+> **编号**：`TR.x` = Rust 对照任务，插在 M2 之后，不占用 M3/M4 的编号。
+
+**硬禁令**（违反即本项失败）：
+
+| 禁令 | 理由 |
+|---|---|
+| 不用 `tokio` / `async-std` / `axum` / `hyper` | 那测的是框架，不是语言 |
+| 不用 `mio` | mio 也是 epoll 之上的抽象层；要对照就自己碰 `libc` |
+| 不改 HTTP 语义、不换架构 | 语义一改，基准就没了 |
+| 不做 TLS / HTTP2 / 多线程 / 零拷贝 | 性能优化留给 M4；本项只做语言对照 |
+
+允许的依赖：`libc`（必须）、`nix`（可选薄封装）、`log`+`env_logger`（可选）。理想状态只有 `libc`。
+
+- [ ] **TR.1 装工具链并配镜像**（1h）
+  - **本机实测**：`static.rust-lang.org` 一个 HEAD 就要 **8.0s**（不可用）；`rsproxy.cn` 0.14s、
+    `mirrors.tuna.tsinghua.edu.cn/rustup/` 0.036s → **必须走镜像**
+  - 装之前先 `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY`
+    （本机代理变量指向 WSL 自己的 loopback，真代理在 Windows 侧，不摘掉会误判「网络不通」）
+  - `export RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup`（备选 `https://rsproxy.cn`）；
+    `~/.cargo/config.toml` 里把 crates-io 换成 `sparse+https://rsproxy.cn/index/`
+  - ✅ `cargo --version` 有输出；`cargo new /tmp/x && cd /tmp/x && cargo build` **1 分钟内**完成
+    （拉不动就是镜像没配好）
+  - ⚠ 这套命令只实测了**端点可达性**，整条链没验证过；真装的时候先跑一遍再往下走
+
+- [ ] **TR.2 目录与接口契约**（0.5h）
+  - `warmups/httpd/rust/`（与 `v1`/`v2` 平级，**不碰 v2**）；模块拆 `main / sys / conn / http / file`；
+    `www` 指向 `../v1/www`
+  - ★ **接口契约（硬要求）**：二进制必须接受同样的 `argv`：`<ip> <port> <www_root>` ——
+    否则复用不了 `v1/tests/run.sh`，就得重写题目，对照失效
+  - `sys.rs` 是全仓库唯一允许 `unsafe` 的模块：crate 级 `#![deny(unsafe_code)]` + 该模块 `#[allow(unsafe_code)]`
+
+- [ ] **TR.3 六个骨架设计决策（自己拍板，全部记进产出笔记）**（2h）
+
+| # | 决策点 | C 版 | Rust 逼你面对什么 |
+|---|---|---|---|
+| 1 | fd 所有权 | 裸 `int`，靠约定 close | `OwnedFd`；而 `epoll_ctl(DEL)` 必须在 `Drop` **之前** → 让 `Conn::drop` 自己 DEL（要拿到 epfd），还是手写 `close_conn()`？**两次尝试都记下来** |
+| 2 | fd → Conn 映射 | 数组按 fd 索引 | `HashMap<RawFd,Conn>` / `Vec<Option<Conn>>` / slab；`epoll_event.data` 里放**索引**，别放裸指针（否则 unsafe 扩散到全局） |
+| 3 | 缓冲区 | `char rbuf[8192]` + `roff/rlen` | 建议照抄语义以便对照；用 `Vec<u8>` 会立刻撞上「切片借用 vs 连接可变借用」——**本项最大的收获点** |
+| 4 | 错误模型 | `ret == -1 && errno == EAGAIN` | 自定义 `enum Io { Done(usize), WouldBlock, Closed, Fatal(io::Error) }`，把「EAGAIN 是正常路径不是错误」表达进类型 |
+| 5 | 不许 panic | 「失败返回错误码，不 `exit`」 | `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]`，顺带把 T1.3/T1.4 的上限防护逼成显式 |
+| 6 | unsafe 边界 | 无处不 unsafe | `MaybeUninit` 只出现在 syscall 封装里；验收见 TR.8 |
+
+- [ ] **TR.4 LT 版事件循环**（3h）
+  - `epoll_create1` → `epoll_ctl(ADD)` → `epoll_wait` 循环；同 C 版 T2.3，先求「能跑」
+  - ✅ `strace -c ./target/release/mini-httpd-rs` 里能看到 `epoll_wait`
+  - 学到：Rust 里没有隐式的 errno 全局，`EAGAIN`/`EINTR` 必须被显式建模
+
+- [ ] **TR.5 切到 ET**（3h）
+  - 所有 fd 加 `EPOLLET`；**accept 循环到 `EAGAIN`**；**read 循环到 `EAGAIN`**；写不完时注册 `EPOLLOUT`
+  - ✅ `wrk -t2 -c100 -d10s http://127.0.0.1:8080/index.html` → Non-2xx = 0 且无超时
+  - 学到：ET 的本质是「只在状态变化时通知一次」（同 C 版 T2.4）；Rust 额外要处理 `libc::epoll_event` 的 packed 布局
+
+- [ ] **TR.6 连接生命周期 + keep-alive**（3h）
+  - ✅ **黑盒语义对齐（本项最重要的一条）**：
+    `cd warmups/httpd/v1 && PORT=8090 bash tests/run.sh ../rust/target/release/mini-httpd-rs`
+    → **55/55 通过，且不许改这个脚本**（改脚本＝改题目）
+  - ✅ 之后开 keep-alive 再跑一遍，把与 v1 语义（一律 `Connection: close`）的差异**逐条记录**：
+    分清「语义等价」与「新加能力」
+  - ✅ `wrk -t4 -c200 -d30s` 全程不崩；压测前后 `ls /proc/<pid>/fd | wc -l` 一致（无 fd 泄漏）
+
+- [ ] **TR.7 健壮性对齐（M3 口径）**（2h）
+  - 慢速 loris（每 2s 发 1 字节）、只发一半就 RST、空闲 5s 超时
+  - ✅ 每种攻击后进程仍在、`grep VmRSS /proc/<pid>/status` 不涨
+  - ✅ 非阻塞证明：`nc` 连上不发数据，**其他**客户端仍能拿到 200
+
+- [ ] **TR.8 工程纪律收口**（1.5h，等价于 `-Werror` + ASan 那套）
+  - ✅ `cargo clippy --all-targets -- -D warnings` 干净；`cargo fmt --check` 干净；`cargo build --release` 0 warning
+  - ✅ `cargo test` 全绿 —— **把 T1.3/T1.4 的用例表原样翻译过来**（同一张用例表两种语言，是最漂亮的对照材料）
+  - ✅ `grep -rn unsafe src/ | grep -v '^src/sys.rs'` → 输出为空
+
+- [ ] **TR.9 压测对照 + 产出笔记**（2h）
+  - 参考项（**明确不是验收项**）：
+    `SRV_CMD=warmups/httpd/rust/target/release/mini-httpd-rs bash tests/bench.sh rust-对照`；
+    同机同参数 C/Rust 各一遍，按 T4.5 的纪律记进 `docs/bench/results.tsv`
+  - ⚠ **预期 Rust 版不会更快**（甚至略慢）：瓶颈在 syscall 与缓冲区拷贝，两边是同一批 syscall。
+    别把「Rust 应该更快」当验收；出现大幅差异先怀疑自己多写了一次拷贝
+  - 产出 `warmups/httpd/docs/05-Rust对照.md`，必须回答 7 条：
+    ① 行数对比（`find src -name '*.rs' | xargs wc -l` vs `wc -l ../v2/*.c`）
+    ② unsafe 行数与出现场合
+    ③ 资源生命周期（C 靠约定 vs Rust 靠类型，各自容易漏什么）
+    ④ 错误处理形态（errno / `Result` / `Io` 枚举）
+    ⑤ 构建与测试体验（Makefile+Unity+vendor vs cargo test/clippy/fmt）
+    ⑥ **卡住点 top3**（尤其借用检查器逼你改设计的地方）
+    ⑦ 结论：对三个方向 Rust 各能替代多少（200 字，可直接进博客与 `07-progress.typ`）
+
+**本项特有的坑**：
+
+- 压测必须用 `--release`：debug 下路径校验/解析会拖垮 QPS，别据此得出「Rust 慢」的结论
+- `libc::EPOLLIN` 是 `c_int`，和 `u32` 混用会天天 `as` → 包一个 `Events(u32)` newtype
+- 判 `EAGAIN` 用 `ErrorKind::WouldBlock`，但 **EINTR 是 `ErrorKind::Interrupted`，必须单独重试**
+- 越界在 C 里是 UB、在 Rust 里是 panic；「不许 panic」意味着每个 `get()` 的 `None` 都要显式处理
+- `libc::epoll_event` 是 `#[repr(C, packed)]`：只填 `data.u64`，别碰 `data.ptr`
+
+---
+
 ## M3 · 健壮性
 
 - [ ] **T3.1 空闲超时**（2h）
@@ -255,6 +356,7 @@
 | M0 | 8h | 进行中 | 2026-10-06：T0.3 完成（`warmups/echo`：echo + 概念图 + 回归全绿，4 个坑都有可复现命令）；T0.2 复核未通过（`src/` 为空、根构建编不动）；T0.4/T0.5 产物在 `warmups/` 但本次未复核。2026-10-07：echo 重写为 `server.c`（argv + dump_bytes + `-DNO_REUSEADDR`/`-DKEEP_SIGPIPE_DEFAULT` 开关），11 条回归 debug/ASan 双绿；`make test`/`make test-asan` 目标已加到 echo、httpd/v1、shell 与根 Makefile |
 | M1 | 10h | v1 完成 | 2026-10-06：`warmups/httpd/v1`（885 行）落地，`tests/run.sh` **55/55**（debug + ASan/LSan），valgrind 0 error / 0 leak；修掉 1 个真 bug（CRLF 解析让所有正常请求 400）；keep-alive 按计划留给 T2.6；M2 的靶子（慢客户端拖死全服）已复现并留证 |
 | M2 | 14h | | |
+| M2+ | 1.5–2 天 | 未开始 | 前置：M2（`warmups/httpd/v2/`）完成，否则无参照物；任务与验收点见「M2+ · Rust 对照实现」；本机尚未安装 Rust，TR.1 是纯前置 |
 | M3 | 9h | | |
 | M4 | 10h | | |
 | M5 | 4h | | |
