@@ -66,11 +66,11 @@
 
 ## M0 · 环境与热身（周 1–2，8h）
 
-- [ ] **T0.1 工具链自检与补齐**（1h）
+- [x] **T0.1 工具链自检与补齐**（1h）
   - 已有：`gcc clang make gdb valgrind nc curl wrk ab cmake`
   - **缺**：`strace`、`perf` → `sudo apt install strace`；perf 在 WSL2 装不了，见 README「WSL2 注意」
   - ✅ `strace -c true` 有输出；`wrk --version` 正常
-- [ ] **T0.2 仓库与构建跑通**（1h）
+- [x] **T0.2 仓库与构建跑通**（1h）
   - 骨架已就绪：`make debug && ./build/debug/mini-httpd`
   - ✅ 三个目标（debug / release / asan）都能编出二进制；`git log` 有一次提交
   - 学到：Makefile 的变量、`.PHONY`、为什么 release 和 debug 要分开编
@@ -87,12 +87,12 @@
   - 学到：`sockaddr_in`、`htons`、`SO_REUSEADDR`
   - ★★ **修正**「不加 `SO_REUSEADDR` 重启就 `EADDRINUSE`」：这个 echo 上**复现不出来**。常规会话结束后 TIME_WAIT 落在**客户端**临时端口；要复现必须让服务端当主动关闭方，而且 `SO_REUSEADDR` 只对「旧 socket 自己也带该选项」的 TIME_WAIT 放行（accepted socket 会从 listener 继承）。双向对照见 `warmups/echo/tests/run.sh` ③
   - ★ **修正**「不忽略 SIGPIPE 会被信号干掉」：本 echo 在 `SIG_DFL` 下 **0/20 被杀** —— 它「一次 read 一次 write」，EOF 之后最多只剩一次 write（成功），碰不到第二次 write 的 EPIPE。机制用最小复现钉死（无 `SIG_IGN` → exit 141；`SIG_IGN` → 存活），**M1/M2 仍必须做 `MSG_NOSIGNAL` / `SIG_IGN`**（HTTP 由服务端自己决定何时写 body，那时才会中招）
-- [ ] **T0.4 热身 ①：mini shell**（2h，路线图 C 第 4 阶段验收）
+- [x] **T0.4 热身 ①：mini shell**（2h，路线图 C 第 4 阶段验收）
   - 支持管道 `|` 与重定向 `>`，用 `fork` + `execvp` + `waitpid`
   - ✅ 在你自己写的 shell 里 `ls | wc -l > out.txt` 结果正确
   - 学到：`dup2`、fd 表、`waitpid` 与僵尸进程
   - 2026-10-07：STAGE=1 套件（10 条）已全绿（`make test`）。修掉两个真 bug：① `main.c` 用 `fgets` 后又判 `feof`，「末行没有换行符」的命令会被整个丢掉（`fgets` 命中 EOF 时**照样返回已读到的那一行**）；② `parse.c` 的分词依赖"每个 token 后面都有分隔符"，末 token 没有分隔符就被吞掉（`echo tail` 变成零参 `echo`）。管道/重定向（STAGE=2）仍未实现
-- [ ] **T0.5 热身 ②：生产者-消费者队列**（2h，路线图 C 第 5 阶段验收）
+- [x] **T0.5 热身 ②：生产者-消费者队列**（2h，路线图 C 第 5 阶段验收）
   - `pthread` + 互斥锁 + 条件变量，固定大小环形缓冲
   - ✅ `make tsan` 编译运行无数据竞争告警
   - 学到：为什么条件变量必须在 `while` 里判条件、`pthread_cond_signal` vs `broadcast`
