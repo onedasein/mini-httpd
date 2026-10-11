@@ -107,26 +107,26 @@
 > `bash tests/run.sh` → **55/55**（debug 与 ASan+UBSan+LeakSanitizer 双跑），valgrind `0 errors` + `All heap blocks were freed`。
 > 审查报告 `warmups/httpd/docs/03-审查报告.md`，总结 `04-M1总结.md`，速查 `02-man与RFC速查.md`。
 
-- [x] **T1.1 观察真实报文**（0.5h）— strace 抓到内核侧真实字节：请求 `recvfrom(...) = 92`（`GET / HTTP/1.1\r\nHost: …\r\n\r\n`）、响应头 `sendto(..., MSG_NOSIGNAL) = 137`
+- [ ] **T1.1 观察真实报文**（0.5h）— strace 抓到内核侧真实字节：请求 `recvfrom(...) = 92`（`GET / HTTP/1.1\r\nHost: …\r\n\r\n`）、响应头 `sendto(..., MSG_NOSIGNAL) = 137`
   - `nc -l 8080` 占住端口，用 `curl -v` 打过去，把原始字节看清楚（每行结尾是 `\r\n`）
   - ✅ 能把自己的请求报文原样打印出来（含不可见字符，用 `od -c` 或 `%q` 打印）
-- [x] **T1.2 请求行解析 + 固定响应**（2h）— `GET /` → 200，body 是 `www/index.html`（408B），响应行 CRLF 结尾
+- [ ] **T1.2 请求行解析 + 固定响应**（2h）— `GET /` → 200，body 是 `www/index.html`（408B），响应行 CRLF 结尾
   - 解析 `METHOD SP PATH SP VERSION CRLF`，返回固定 body
   - ✅ `curl -i http://127.0.0.1:8080/` 同时看到状态行与 body
-- [x] **T1.3 headers 解析成结构 + 上限防护**（2h）— 单行 20000B → **431**；总量 70KB → **431**；URI 2500B → **414**；`Content-Length: 9999999` → 413；`hOsT` / `cOnNeCtIoN: CLOSE` 大小写不敏感；重复同名 header 允许
+- [ ] **T1.3 headers 解析成结构 + 上限防护**（2h）— 单行 20000B → **431**；总量 70KB → **431**；URI 2500B → **414**；`Content-Length: 9999999` → 413；`hOsT` / `cOnNeCtIoN: CLOSE` 大小写不敏感；重复同名 header 允许
   - 大小写不敏感（`Connection` / `connection`）、允许多个同名 header、**单行 ≤ 8KB、总量 ≤ 64KB**，超了就 431/400
   - ✅ 20000 字节的单行 header 不崩、不越界（ASan 版跑同一套全绿）
   - 学到：为什么不能对二进制/未信任输入用 `strcpy`/`strcat`（用长度 + `memchr`）——全仓库 `grep` 无一处 `strcpy/strcat/sprintf`
   - ★ 附带踩坑：`next_line` 吃掉 `\r` 却没回退行尾指针 → **所有 CRLF 请求被误判 400、裸 LF 反而 200**。见 `03-审查报告.md` B1
-- [x] **T1.4 静态文件服务 + 路径安全**（3h）— 路径穿越 `--path-as-is /../Makefile` → **400 且不泄漏内容**；`%2e%2e%2f`、`..%2f`、`%00` → 400；指向 `/etc/passwd`、`../Makefile` 的符号链接 → **403**；www 内正常软链 → 200；目录无 index → 404
+- [ ] **T1.4 静态文件服务 + 路径安全**（3h）— 路径穿越 `--path-as-is /../Makefile` → **400 且不泄漏内容**；`%2e%2e%2f`、`..%2f`、`%00` → 400；指向 `/etc/passwd`、`../Makefile` 的符号链接 → **403**；www 内正常软链 → 200；目录无 index → 404
   - 把 URL path 映射到 `./www` 下的文件；`Content-Type` 用一张小表（html/css/js/png/jpg/txt/json）
   - **必须挡住** `..`（先做前缀归一化或用 `realpath()` 校验结果仍以 `www/` 开头）——两条都做了（`file.c` 双保险）
   - ✅ `curl --path-as-is 'http://127.0.0.1:8080/../Makefile'` 返回 400/404 **而不是** Makefile 内容
   - ✅ `curl -I http://127.0.0.1:8080/index.html` 的 `Content-Type`/`Content-Length` 正确
-- [x] **T1.5 完整写 + 部分写**（1.5h）— 10MB `cmp` 一致；把客户端 `SO_RCVBUF` 压到 4096 并间歇停读，逼出「部分写/EAGAIN/POLLOUT」路径，仍是 `10485760/10485760`
+- [ ] **T1.5 完整写 + 部分写**（1.5h）— 10MB `cmp` 一致；把客户端 `SO_RCVBUF` 压到 4096 并间歇停读，逼出「部分写/EAGAIN/POLLOUT」路径，仍是 `10485760/10485760`
   - `write()` 返回值可能小于请求长度，必须循环写完
   - ✅ `curl -o out.bin http://127.0.0.1:8080/big.bin` 后 `cmp` 与源文件一致（自己造一个 10MB 文件）
-- [x] **T1.6 HTTP 语义细节**（1h）— `HEAD` 只发 137 字节头（Content-Length 仍为 408）；`PUT`/`DELETE` → 405 + `Allow: GET, HEAD`；缺 `Host` 的 1.1 → 400；`HTTP/2.0` → 505；裸 LF 行尾宽容接受
+- [ ] **T1.6 HTTP 语义细节**（1h）— `HEAD` 只发 137 字节头（Content-Length 仍为 408）；`PUT`/`DELETE` → 405 + `Allow: GET, HEAD`；缺 `Host` 的 1.1 → 400；`HTTP/2.0` → 505；裸 LF 行尾宽容接受
   - `HEAD` 不返回 body；非法方法 → 405；HTTP/1.0 默认短连接；`Connection: close` 立即断开
   - ✅ 四条各用 `curl -I/-X` 手工验一遍
   - 注：keep-alive 按计划留给 **T2.6**（v1 一律 `Connection: close`）
