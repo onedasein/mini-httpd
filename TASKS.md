@@ -184,9 +184,13 @@
 - [ ] **T1.2d 响应拼装**（40min）
   - `http_build_response_head()`：状态行 + `Content-Type` / `Content-Length` / `Connection: close` / `Server`；**用 `snprintf` 并检查截断**（返回「本该写入的长度」要和 cap 比）
   - 验收：单测断言「响应头以 `\r\n\r\n` 结束」「Content-Length 等于给定 body 长度」
-- [ ] **T1.2e listener + 串行 accept 主循环**（40min）
+- [x] **T1.2e listener + 串行 accept 主循环**（40min）— ✅ 2026-10-11 完成（`src/main.c` 已写全，I/O 与生命周期部分）
   - `socket → setsockopt(SO_REUSEADDR) → bind → listen(128) → accept → read → write → close`；`make_listener()` 失败返错码；启动打印 `listening on <ip>:<port>  (www-root=...)`
   - 验收：`./build/debug/mini-httpd 127.0.0.1 8080 tests/www &` 后 `curl -i http://127.0.0.1:8080/` 能同时看到状态行与 `tests/www/index.html` 的 body
+  - ✅ 实现要点（实测过）：3 个 IO 包装（`conn_read`/`write_all`/`file_read`）是 M2 唯一的换装点；`sigaction(SIGTERM)` **不设 `SA_RESTART`**（设了 `accept` 会被内核重启，`kill -TERM` 后卡住不退，实测 exit=124 vs 0）；
+    `accept` 错误分级（`EINTR`/`ECONNABORTED` 继续、`EMFILE`/`ENFILE` 退避 100ms 绝不退出）；`rbuf` 在 `main` 里分配一次复用；`fd` 归属单一（`cfd` 归 main、`sf.fd` 归 handle_conn、`goto done` 单出口）
+  - ✅ 验收实测（用 `build/verify/` 里的一次性 stub 链接跑的，见下）：200/HEAD(CL 正确)/query 忽略/目录补 index.html/405+Allow/404/400 穿越/裸 LF/逐字节到达全过；50 次请求前后 fd 数 7→7；`SIGTERM → exit=0`
+  - 🐛 **T1.7a 移植 e2e 时必现的坑（已修）**：`src/httpd.h` 的 `MAX_HEADER_LEN` 是 8KB，所以超长请求是「读一半就回 431 然后 close」。若接收队列里还有没读完的字节就 `close`，内核发 RST 而不是 FIN —— 客户端还在写它那条超大请求，写入失败后 `printf … | nc` 会**直接退出、读不到 431**（实测：服务端日志记了 431，客户端拿到空响应；换成会先读完响应的客户端就能收到）。修法 = lingering close：`conn_finish()` 先 `shutdown(SHUT_WR)`，再把余量读掉（200ms 超时 + 最多 1MB 双上限），`handle_conn` 用返回值告诉 main 要不要收尾。修完单行 20000B 与总量 70KB 两条 `nc` 断言都能读到 431，而正常请求路径不受影响（100 次 0.45s）
 
 ### 阶段 C · header 解析与上限（约 3h）
 
@@ -532,6 +536,9 @@
 - 路径穿越 `..` 没挡 → 泄漏任意文件（**必测项**）
 - 忘了 `SIGPIPE` → 客户端一断，服务端被信号杀死
 - 用 `strcat/sprintf` 拼响应头 → 缓冲区溢出（用 `snprintf` + 长度检查）
+- **接收队列里还有没读完的字节就 `close` → 内核发 RST，客户端读不到你已经发出的响应**（2026-10-11 实测：超长请求早退 431 时，
+  `printf … | nc` 客户端还在写 → 写入失败直接退出 → 431「丢了」）。修法：`shutdown(SHUT_WR)` + 有界地把余量读掉再 close（lingering close，见 `src/main.c` 的 `conn_finish`）
+- **给 `sigaction` 设了 `SA_RESTART` → `accept` 被内核自动重启，`kill -TERM` 后进程卡住不退出**（实测：带 `SA_RESTART` exit=124，不带 exit=0；glibc 的 `signal()` 默认就带 `SA_RESTART`，所以别用它装 SIGTERM）
 
 ---
 
@@ -540,7 +547,7 @@
 | 里程碑 | 计划 | 实际 | 备注（卡在哪、怎么解决） |
 |---|---|---|---|
 | M0 | 8h | ✅ 完成 | 2026-10-06：echo（T0.3）。2026-10-07：echo 重写 `server.c`。2026-10-08：echo 分层（Unity 单元 + e2e）。2026-10-09：shell 分层（`make test` 10 条，修掉 `fgets` 末行与分词末 token 两个真 bug）。2026-10-10/11：pc 信号量版 + `pc/cv` 条件变量版（TSan 走 `setarch -R` 绕 ASLR 假阳性）+ `concurrent_learn`（CSAPP 第 12 章例子）。**T0.2 的根构建旧账并入 M1-T1.0b**（根 `Makefile` 现为 0 字节） |
-| M1 | 原 10h / 重做 15–17h | 🚧 地基已完（T1.0a–c） | 2026-10-06 的 `warmups/httpd/v1`（885 行、`tests/run.sh` 55/55、debug+ASan、valgrind 0 error）**降级为对照物**；2026-10-11 决定在根 `src/` 亲手重做，验收契约与状态码表见 M1 开头。**2026-10-11 阶段 A 完成**：根 `Makefile` 重建（debug/release/asan + test/e2e/check，零告警）、Unity v2.7.0 vendor 进 `tests/unit/unity/`（sha256 与 warmups/echo 一致）、空套件与缺失 e2e 脚本都会明确失败、`src/main.c` 只留一次性占位、README 目录树与磁盘对齐、空 `v1/` 删除、`warmups/httpd/{v1,v2}` 标注为对照物/已取代。**下一步：T1.1（观察真实报文）→ T1.2a（定接口）** |
+| M1 | 原 10h / 重做 15–17h | 🚧 地基 + main.c 已完（T1.0a–c、T1.2e） | 2026-10-06 的 `warmups/httpd/v1`（885 行、`tests/run.sh` 55/55、debug+ASan、valgrind 0 error）**降级为对照物**；2026-10-11 决定在根 `src/` 亲手重做，验收契约与状态码表见 M1 开头。**2026-10-11 阶段 A 完成**：根 `Makefile` 重建（debug/release/asan + test/e2e/check，零告警）、Unity v2.7.0 vendor 进 `tests/unit/unity/`、空套件与缺失 e2e 脚本都会明确失败、README 目录树与磁盘对齐。**2026-10-11 T1.2e 完成**：`src/main.c` 写全（串行 accept + 3 个 IO 包装 + 单一出口 + 错误码映射表 + 有界 lingering close），并用一次性 stub 链接着实跑过验收（见 T1.2e 的实测清单）。**下一步：`src/http.c`（先函数 1 扫描器 → 函数 2 解析 → 响应侧）与 `src/file.c`；`make debug` 现在会链接失败报 undefined reference，那串符号就是待写清单** |
 | M2 | 14h | 未开始 | 落点 = 根 `src/` 原地改造；对照基线 = `git tag m1-blocking`；靶子（慢客户端拖死全服）已在 v1 上复现并留证 |
 | M2+ | 1.5–2 天 | 未开始 | 前置：根 `src/` 的 M2 完成（`m2-epoll`）；任务是 TR.1–TR.9；本机尚未安装 Rust，TR.1 是纯前置 |
 | M3 | 9h | 未开始 | 步骤已展开到 30–40min 粒度 |
