@@ -21,32 +21,42 @@
 ## 构建与运行
 
 ```bash
-make debug      # -O0 -g3，开发用（gdb 友好）
+make debug      # -O0 -g，开发用（gdb 友好）
 make release    # -O2，压测必须用这个
 make asan       # AddressSanitizer + UBSan，体检用
-make run        # 编译并启动在 127.0.0.1:8080
+make test       # 单元测试（tests/unit/*.c，Unity）
+make e2e        # 端到端（tests/e2e/run.sh 起进程、走网络）
+make check      # test + e2e（提交前用）
+make run        # 编译并启动（ARGS 默认 127.0.0.1 8080 tests/www）
 make clean
 ```
 
 ```bash
-./build/debug/mini-httpd 8080 &
+./build/debug/mini-httpd 127.0.0.1 8080 tests/www &     # 三段 argv：<ip> <port> <www_root>
 curl -i http://127.0.0.1:8080/index.html
 wrk -t4 -c100 -d30s --latency http://127.0.0.1:8080/index.html
 ```
+
+启动成功时 stdout 会先打一行含 `listening on` 的信息，e2e 脚本靠这句话同步 —— **别改这句措辞**。
 
 ## 目录结构
 
 ```
 mini-httpd/
-├── TASKS.md      # 任务分解
-├── bench.sh      # 压测脚本：固定参数、自动起服务、结果落盘（见 M4）
-├── src/          # 源
-├── www/          # 被测的静态文件根目录
+├── TASKS.md          # 任务分解（M0–M5，每一步都有预计时间与验收点）
+├── Makefile          # 根构建：debug / release / asan + test / e2e / check
+├── src/              # 服务器源码（M1 阻塞版 → M2 epoll 版，同一份原地演进）
+├── tests/
+│   ├── www/          # 被测的静态文件根目录（argv 第三段，默认就指这里）
+│   ├── unit/         # 单元测试 test_*.c；Unity vendored 在 unit/unity/（v2.7.0）
+│   ├── e2e/          # 端到端脚本 run.sh（M1-T1.7a）
+│   └── bench.sh      # 压测脚本：固定参数、自动起服务、结果落盘（见 M4）
 ├── docs/
-│   ├── env.md    # 环境笔记（T0.1）
-│   ├── bench.md  # 压测与优化记录（T4.x）
-│   └── bench/    # 每次压测的原始输出 + results.tsv
-└── build/        # 编译产物（已 gitignore）
+│   ├── bench.md      # 压测与优化记录（T4.x）
+│   └── bench/        # 每次压测的原始输出 + results.tsv（跑 bench 时生成）
+├── warmups/          # M0 的热身产物（echo / shell / pc / concurrent_learn）
+│                     #   warmups/httpd/v1 = M1 的参考对照物，不再演进
+└── build/            # 编译产物（已 gitignore）
 ```
 
 ## WSL2 注意事项
