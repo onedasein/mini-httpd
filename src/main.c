@@ -42,16 +42,19 @@
 #include <unistd.h>
 
 /* 命令行默认值：三段都可以省。e2e 脚本与 tests/bench.sh 都按这个约定调用，别乱改。 */
-#define DEFAULT_IP                "127.0.0.1"
-#define DEFAULT_PORT              8080
-#define DEFAULT_ROOT              "tests/www"
+#define DEFAULT_IP                    "127.0.0.1"
+#define DEFAULT_PORT                  8080
+#define DEFAULT_ROOT                  "tests/www"
 
 /* 「方法不允许」回哪个码：M1 验收契约（TASKS.md）+ v1 的 55 条断言都要求
  *   405 + "Allow: GET, HEAD"。
- * ⚠ 注意：src/httpd.h 的 MAX_METHOD_LEN 注释、src/http.h 的 HTTP_ERR_METHOD 注释里写的是 501。
- *   两边必须统一（改注释，或改 TASKS.md 契约与 e2e 断言），否则 T1.7a 移植来的 e2e 会有两条红。
- *   想拆得更细也行：method 语法非法/超长 → 400/501；method 合法但不在白名单 → 405。 */
-#define STATUS_METHOD_NOT_ALLOWED 405
+ *   method 语法非法 → 400；
+ *   method 在已知名单但不在白名单 → 405。
+ *   method 超长或小写-> 501;
+ */
+#define STATUS_METHOD_SYNTAX_ERROR    400
+#define STATUS_METHOD_NOT_ALLOWED     405
+#define STATUS_METHOD_NOT_IMPLEMENTED 501
 
 /* ------------------------------------------------------------------ 全局 */
 static const char *g_root_real;              /* 文档根 realpath，启动时算一次 */
@@ -218,6 +221,8 @@ static int status_from_parse_err(http_err e) {
             return 505;
         case HTTP_ERR_INTERNAL:
             return 500;
+        case HTTP_ERR_NOT_IMPLEMENTED:
+            return 501;
     }
     return 400;      /* 解析失败一律算客户端问题：宁可 400，别回 500 把锅甩给自己 */
 }
@@ -291,7 +296,12 @@ static int handle_conn(int cfd, const char *peer, char *rbuf) {
         extra = (status == STATUS_METHOD_NOT_ALLOWED) ? "Allow: GET, HEAD\r\n" : NULL;
         send_error(cfd, status, extra, req.head_only);
         log_request(peer, req.method, req.method_len, req.target, req.target_len, status, 0);
-        drain = (req.content_length > 0); /* 第一版不读 body：声明了 body 就还有没读的字节 */
+        drain =
+            (req.content_length >
+             0); /* 第一版不读 body：声明了 body
+                  * 就还有没读的字节；如果客户端声明CL:0或没有CL却仍然多发了字节，我们不drain->close发RST->客户端可能读不到响应。M2的keep-alive会自然修掉。
+                  */
+
         goto done;
     }
 

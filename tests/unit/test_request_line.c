@@ -2,7 +2,6 @@
  *
  * TODO(T1.2b)：用例表先写在 docs/ 或 DESIGN 里，再落到这里。
  * 顺序：契约（CONTRACTS.md §1 + docs/rfc/解析待定项.md 决策完）→ 用例表 → 本文件 → 实现。
- * 期望值必须有唯一出处；`docs/rfc/解析待定项.md` 里还有 ⏳ 的条目，先别动它们。
  * 表驱动骨架与切片比较 helper 见 DESIGN.md §5.2；每轮记得 http_request_free(&req)。
  */
 #include "unity.h"

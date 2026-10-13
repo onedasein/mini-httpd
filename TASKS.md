@@ -175,7 +175,7 @@
   - 交付 `src/httpd.h`（上限常量 + 版本串）、`src/http.h`：`struct request` 字段、错误码枚举、`http_parse_request_line()` / `http_find_header()` / `http_build_response_head()` 原型
   - 关键：接口先定，测试才有东西可调；返回错误码不 `exit()`
   - 验收：`make debug` 过（实现可以先 `return -1`）
-- [ ] **T1.2b 用例表先行：请求行**（30min｜[手写]）
+- [x] **T1.2b 用例表先行：请求行**（30min｜[手写]）
   - 交付 `tests/unit/test_request_line.c`：表驱动（一行一个输入 → 期望错误码/期望字段），至少覆盖 `GET / HTTP/1.1`、多空格、缺 version、`GARBAGE\r\n`、裸 LF
   - 关键：**这张用例表是 M2+ Rust 对照要原样翻译的那张**，字段名与错误码别随手改
   - 验收：`make test` 里能看到断言失败（红），不是编译错误
@@ -582,12 +582,10 @@
 
 ### 下一步（顺序别反）
 
-1. **决策 `docs/rfc/解析待定项.md` 里的 ⏳ 条目**（每条写"决定 + 出处"；语义级的补一篇 `docs/adr/`）——
-   这是写用例表的**前提**，因为用例的期望值必须有唯一出处；
-2. 写 **`tests/unit/test_request_line.c` 的用例表**（表驱动；现在那个 `1 Tests` 是零断言空壳，**不算测试**）；
-3. 按 `CONTRACTS.md` §2 实现 `src/http.c`（建议顺序：`http_scan_header_end` → `http_request_parse` → 响应侧三个）；
-4. `src/file.c`（T1.4）；
-5. `tests/e2e/run.sh`（T1.7a）。
+1. 写 **`tests/unit/test_request_line.c` 的用例表**（表驱动；现在那个 `1 Tests` 是零断言空壳，**不算测试**）；
+2. 按 `CONTRACTS.md` §2 实现 `src/http.c`（建议顺序：`http_scan_header_end` → `http_request_parse` → 响应侧三个）；
+3. `src/file.c`（T1.4）；
+4. `tests/e2e/run.sh`（T1.7a）。
    另外三个用例表文件按语义分组，等对应表写好了再建：`test_headers.c` / `test_limits.c` / `test_path_decode.c`。
 
 ### 当前红黄灯

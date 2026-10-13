@@ -6,12 +6,27 @@
 
 ---
 
+## 0. 已知方法清单
+
+只影响状态码405/501的分流
+- 已知方法清单：
+{ACL, BASELINE-CONTROL, BIND, CHECKIN, CHECKOUT, CONNECT, COPY, DELETE, GET, HEAD, LABEL, LINK, LOCK, MERGE, MKACTIVITY, MKCALENDAR, MKCOL, MKREDIRECTREF, MKWORKSPACE, MOVE, OPTIONS, ORDERPATCH, PATCH, POST, PRI, PROPFIND, PROPPATCH, PUT, QUERY, REBIND, REPORT, SEARCH, TRACE, UNBIND, UNCHECKOUT, UNLINK, UNLOCK, UPDATE, UPDATEREDIRECTREF, VERSION-CONTROL}
+
+- 白名单：
+{GET, HEAD}
+
+| 码 | 触发条件 | 谁产生 | 出处|
+|---|---|---|---|
+| 405 | method在已知方法清单里但是不在白名单中(除了{GET, HEAD}外的所有合法方法) | http.c| RFC 9110 §15.5.6 |
+| 501 | method不在已知清单中(`get`、`Foo`、超长token) | http.c | RFC 9110 §15.6.2 |
 ## 1. 状态码表（语义真源）
 
 | 码 | 触发条件 | 谁产生 | 出处 |
 |---|---|---|---|
 | 200 | 文件存在（目录请求补 `index.html`） | `file.c` → `main.c` | RFC 9110 §15.3.1 |
-| 400 | 请求行语法错；HTTP/1.1 缺 `Host`；`..` 穿越；`%00` / 反斜杠；版本字段语法不合;三段之间多个连续空格(`GET  /  HTTP/1.1`);用\t当分隔符；HTTP/1（缺次版本）/版本字段带尾随空格；版本字段为空；target非origin-form`(http://host/x、*)`；行尾只有`\r`没有`\n`；重复`Content-Length`且值不同 | `http.c` / `file.c` | RFC 9112 §2.2、§3.2 §3 §2.3 § 6.3 |
+| 400 | 请求行类：HTTP/1.1缺`Host`; 三段之间连续多个空格；版本字段为空；行尾只有`\r`没有`\n` | `http.c` | RFC 9112 §2.2  §2.3 |
+| 400 | targe与解码类:target非origi-form`(http://host/x、*)`；非法`%XX`、`%00`、 反斜杠、解码出控制字符；`..`穿越； | file.c | - |
+| 400 | 字段类：版本字段语法不合；请求行语法错；重复`Content-Length`且值不同 | `http.c` | RFC 9112 §3 §6.3 |
 | 403 | `realpath` 后越出文档根；`EACCES` | `file.c` | RFC 9110 §15.5.4 |
 | 404 | 文件不存在；目录没有 `index.html` | `file.c` | RFC 9110 §15.5.5 |
 | 405 | 方法合法但不在白名单（PUT / DELETE / …），响应必须带Allow: GET, HEAD | `http.c` 报 `HTTP_ERR_METHOD` → `main.c` 映射 | RFC 9110 §15.5.6、**ADR-002** |
@@ -19,12 +34,11 @@
 | 414 | `request-target > MAX_PATH_LEN` | `http.c` | RFC 9110 §15.5.16 |
 | 431 | 单行 > `MAX_LINE_LEN`；head 总量 > `MAX_HEADER_LEN`；字段数 > `MAX_HEADERS` | `main.c`（早退）+ `http.c` | RFC 9110 §15.5.23 |
 | 500 | 内部分配失败（`HTTP_ERR_INTERNAL`） | `http.c` → `main.c` | RFC 9110 §15.6.1 |
-| 501 | method为小写`get`; method超长(> `MAX_METHOD_LEN`)| http.c | RFC 9110 §9.1 |
+| 501 | method为小写`get`; method超长(> `MAX_METHOD_LEN`)| http.c | RFC 9110 §15.6.2 |
 | 505 | 版本形如 `HTTP/x.y` 但不受支持 | `http.c` | RFC 9110 §15.6.6 |
-
 | **静默关闭**（一个字节都不回） | 请求没发完就 EOF / 读写出错 | `main.c` | — |
 
-`Content-Length:0`与没有该header的情况，正常处理，无错误码
+**不报错误码的情形**：`Content-Length:0`与没有该header的情况，正常处理，无错误码
 
 ---
 
@@ -61,6 +75,7 @@
 | `HTTP_ERR_TOO_MANY_HEADERS` | 431 | |
 | `HTTP_ERR_BODY_TOO_LARGE` | 413 | |
 | `HTTP_ERR_INTERNAL` | 500 | |
+| `HTTP_ERR_NOT_IMPLEMENTED` | 501 |
 | （未列举的值） | 400 | 解析失败算客户端问题，别回 500 |
 
 | `file_status` | 状态码 |

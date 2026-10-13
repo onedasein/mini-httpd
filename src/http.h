@@ -36,7 +36,9 @@ typedef struct {
      * 调用方必须通过 http_request_free() 释放（或自行 free(req->path)）。 */
     char *path;
 
-    /* 解析后的 Content-Length；没有该 header 时为 0。 */
+    /* 解析后的 Content-Length；没有该 header 时为 0。
+        Content-Length:0 也是0，二者不区分。
+    */
     size_t content_length;
 
     /* ← 2026-10-11 补：method 是 "HEAD" 时置 1。
@@ -50,13 +52,14 @@ typedef struct {
 typedef enum {
     HTTP_OK = 0, /* 200 OK              —— 解析成功 */
     HTTP_ERR_BAD_REQUEST, /* 400 Bad Request */
-    HTTP_ERR_METHOD, /* 405 Method Not Allowed（白名单外的方法；响应必须带 Allow，见 docs/adr/002） */
+    HTTP_ERR_METHOD, /* 405 Method Not Allowed（已知方法但不在白名单；响应必须带 Allow） */
     HTTP_ERR_URI_TOO_LONG, /* 414 URI Too Long */
     HTTP_ERR_VERSION, /* 505 HTTP Version Not Supported */
     HTTP_ERR_HEADER_TOO_LARGE, /* 431 Request Header Fields Too Large */
     HTTP_ERR_TOO_MANY_HEADERS, /* 431 Request Header Fields Too Large */
     HTTP_ERR_BODY_TOO_LARGE, /* 413 Payload Too Large */
     HTTP_ERR_INTERNAL, /* 500 Internal Server Error */
+    HTTP_ERR_NOT_IMPLEMENTED /* 501 Not Implemented*/
 } http_err;
 
 /* ---------- 函数原型 ---------- */

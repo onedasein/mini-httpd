@@ -135,7 +135,7 @@ Connection: close\r\n
 
 | 段 | 常量 | 超了 / 不合法 |
 |---|---|---|
-| method | `MAX_METHOD_LEN` | 见 `CONTRACTS.md` §1；**语法类**边界仍待定（`解析待定项.md` #2 #3） |
+| method | `MAX_METHOD_LEN` | 见 `CONTRACTS.md` §1；**语法类**边界已定 |
 | request-target | `MAX_PATH_LEN` | 414 |
 | version | `MAX_VERSION_LEN` | 505（形如 `HTTP/x.y` 但不支持）／400（语法不合） |
 | 整行 | `MAX_LINE_LEN` | 431 |
@@ -145,7 +145,7 @@ Connection: close\r\n
 
 **完整表（含"谁产生"）在 `CONTRACTS.md` §1**；最常查的一条：
 方法不在白名单 → **405 + `Allow: GET, HEAD`**（ADR-002）。
-超长 / 语法非法的方法回 400 还是 501 **还没定**，别在实现里偷偷选。
+超长 / 语法非法的方法的指向已定。
 
 ### 8.4 行尾与宽容度（本项目已定）
 
@@ -154,6 +154,3 @@ Connection: close\r\n
 - 空行 = head 结束，**不许**把它当成"长度为 1 的行"（v1 的 B1 事故：`docs/archive/v1-审查报告.md`）；
 - 解析函数只吃"已经切好的 head"（`head_len` 由扫描器给），**解析器里不要再判一次边界**。
 
-### 8.5 还没定的语法歧义
-
-全部在 `docs/rfc/解析待定项.md`。写解析器之前先把它清空 —— 否则用例表的期望值没有唯一出处。
