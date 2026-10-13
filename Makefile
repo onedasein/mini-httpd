@@ -93,14 +93,18 @@ build/asan/test_%: tests/unit/test_%.c $(LIB_SRC) $(UNITY_ASAN) Makefile
 	      -o $@ $< $(LIB_SRC) $(UNITY_ASAN) $(LDLIBS)
 
 # 每条测试套 timeout：服务器相关用例的失败模式可能是「阻塞不返回」，不设上限会把 make 挂住
+# 另外挡住「有 test_*.c 但一个用例都没跑」：Unity 打印 "0 Tests ..." 就判红（2026-10-13 补的漏洞）
 test: $(TEST_BIN)
 	@if [ -z "$(TEST_BIN)" ]; then \
 	  echo "没找到任何单元测试（tests/unit/test_*.c）—— 空套件不许报「全部通过」"; exit 1; \
 	fi; \
 	rc=0; for t in $(TEST_BIN); do \
 	  printf '\n===== %s =====\n' "$$t"; \
-	  timeout $(TMO) "$$t"; st=$$?; \
+	  out=$$(timeout $(TMO) "$$t" 2>&1); st=$$?; \
+	  printf '%s\n' "$$out"; \
 	  if [ $$st -eq 124 ]; then echo "!! $$t 超时（$(TMO)s）"; rc=1; \
+	  elif printf '%s' "$$out" | grep -q '^0 Tests'; then \
+	    echo "!! $$t 跑了 0 个用例 —— 空套件不算过（先写用例表：TASKS.md T1.2b）"; rc=1; \
 	  elif [ $$st -ne 0 ]; then rc=1; fi; \
 	done; \
 	if [ $$rc -eq 0 ]; then printf '\n单元测试：全部通过\n'; else printf '\n单元测试：有失败\n'; fi; \
@@ -112,8 +116,11 @@ test-asan: $(TEST_ASAN_BIN)
 	fi; \
 	rc=0; for t in $(TEST_ASAN_BIN); do \
 	  printf '\n===== %s (ASan+UBSan) =====\n' "$$t"; \
-	  ASAN_OPTIONS=detect_leaks=1 timeout $(TMO) "$$t"; st=$$?; \
+	  out=$$(ASAN_OPTIONS=detect_leaks=1 timeout $(TMO) "$$t" 2>&1); st=$$?; \
+	  printf '%s\n' "$$out"; \
 	  if [ $$st -eq 124 ]; then echo "!! $$t 超时（$(TMO)s）"; rc=1; \
+	  elif printf '%s' "$$out" | grep -q '^0 Tests'; then \
+	    echo "!! $$t 跑了 0 个用例 —— 空套件不算过（先写用例表：TASKS.md T1.2b）"; rc=1; \
 	  elif [ $$st -ne 0 ]; then rc=1; fi; \
 	done; \
 	if [ $$rc -eq 0 ]; then printf '\n单元测试(ASan)：全部通过\n'; else printf '\n单元测试(ASan)：有失败\n'; fi; \

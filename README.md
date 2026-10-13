@@ -43,21 +43,37 @@ wrk -t4 -c100 -d30s --latency http://127.0.0.1:8080/index.html
 
 ```
 mini-httpd/
-├── TASKS.md          # 任务分解（M0–M5，每一步都有预计时间与验收点）
+├── README.md         # 本文件：项目是什么、怎么编怎么跑
+├── DESIGN.md         # 设计真源：要写什么 / 架构 / 实现顺序 / 测试策略
+├── CONTRACTS.md      # 契约真源：状态码表 / 函数契约 / 错误码映射 / 纪律（先改它，再改代码）
+├── TASKS.md          # 执行计划：M0–M5，每一步都有预计时间与验收点
 ├── Makefile          # 根构建：debug / release / asan + test / e2e / check
 ├── src/              # 服务器源码（M1 阻塞版 → M2 epoll 版，同一份原地演进）
+│   ├── httpd.h       # 上限常量与版本串（数字的唯一真源）
+│   ├── http.h/.c     # 协议：字节 ↔ 请求结构、响应头拼装
+│   ├── file.h/.c     # URL 路径 → 根下真实文件（含路径安全）
+│   └── main.c        # I/O 与生命周期：收连接 / 读写 / 关 fd / 信号 / argv
 ├── tests/
 │   ├── www/          # 被测的静态文件根目录（argv 第三段，默认就指这里）
 │   ├── unit/         # 单元测试 test_*.c；Unity vendored 在 unit/unity/（v2.7.0）
 │   ├── e2e/          # 端到端脚本 run.sh（M1-T1.7a）
 │   └── bench.sh      # 压测脚本：固定参数、自动起服务、结果落盘（见 M4）
-├── docs/
+├── docs/             # 参考资料（非真源）—— 入口见 docs/README.md 的文档地图
+│   ├── README.md     # 文档地图：谁是真源、什么该查哪里
+│   ├── rfc/          # 报文语法与状态码出处、系统调用实测结论（写解析器时查它）
+│   ├── adr/          # 决策记录（为什么这么定）
+│   ├── method/       # 设计方法论模板
+│   ├── reports/      # 阶段性报告（M1/M2 总结、Rust 对照）
+│   ├── archive/      # 只读存档：v1 审查报告、warmup 概念图、2026-10-13 重构指令
 │   ├── bench.md      # 压测与优化记录（T4.x）
 │   └── bench/        # 每次压测的原始输出 + results.tsv（跑 bench 时生成）
 ├── warmups/          # M0 的热身产物（echo / shell / pc / concurrent_learn）
 │                     #   warmups/httpd/v1 = M1 的参考对照物，不再演进
 └── build/            # 编译产物（已 gitignore）
 ```
+
+**文档地图（先看这个）**：[`docs/README.md`](docs/README.md) —— 明确写了"同一件事只能有一个真源"，
+以及"写代码时该查哪一份"。改动顺序：`CONTRACTS.md` → `docs/adr/` → `src/*.h` → 实现 → 测试。
 
 ## WSL2 注意事项
 

@@ -126,20 +126,21 @@
 | 连接语义 | v1 一律 `Connection: close`（keep-alive 是 T2.6） | v1 的 55 条断言 |
 | 计数 | `Content-Length` 必须等于**真实字节数**（HEAD 也是） | T1.5 / T1.6 |
 
-**状态码表**（每行都要有 e2e 断言，不许「大概能对上」）：
+**状态码表 / 上限常量 → 真源已统一到 `CONTRACTS.md`（2026-10-13 重组）。**
 
-| 码 | 触发条件 |
+这里**不再抄一份** —— 抄一份就一定会飘。本次就实测到两处飘法，留作教训：
+
+- 本节原来写「单行 > 8KB / 头部总量 > 64KB → 431」，而 `src/httpd.h` 里是 `MAX_LINE_LEN 4096`、`MAX_HEADER_LEN 8192`；
+- 本节原来写的常量名 `MAX_URI` / `MAX_PATH` **在代码里并不存在**（实际是 `MAX_PATH_LEN`，且没有 `MAX_URI`）。
+
+| 我要查 | 去哪 |
 |---|---|
-| 200 / 404 | 文件在（目录补 `index.html`）/ 文件不在、目录没有 `index.html` |
-| 400 | 请求行语法错、`..` 穿越、`%00`、HTTP/1.1 缺 `Host`、版本字段非法 |
-| 403 | `realpath` 结果越出文档根、EACCES |
-| 405 + `Allow: GET, HEAD` | PUT / DELETE / 任何白名单外方法 |
-| 413 | `Content-Length` > 1MB（第一版不收 body） |
-| 414 | request-target > 2KB |
-| 431 | 单行 > 8KB / 头部总量 > 64KB / 字段数 > 64 |
-| 505 | 版本不是 1.0 / 1.1 |
+| 状态码语义 + "谁产生" + RFC 出处 | `CONTRACTS.md` §1 |
+| 上限的**数字与名字** | `src/httpd.h`（**数字唯一真源是代码**） |
+| 错误码 → 状态码映射 | `CONTRACTS.md` §3（实现在 `main.c`，只此一处） |
+| 还没定的语法边界 | `docs/rfc/解析待定项.md` |
 
-**上限常量**（写进 `src/httpd.h`，**先有上限、再有解析**）：`MAX_LINE 8KB`、`MAX_HEADER 64KB`、`MAX_URI 2KB`、`MAX_HEADERS 64`、`RBUF = MAX_HEADER + MAX_LINE`、`MAX_PATH 4KB`、`MAX_BODY 1MB`。
+纪律：**每个状态码都要有 e2e 断言**（T1.7a）。
 
 **全局禁令**：`grep -rn 'strcpy\|strcat\|sprintf' src/` **必须为空**；被测函数**失败返回错误码、不 `exit()`**；
 写一律 `MSG_NOSIGNAL` + 进程级 `SIG_IGN` 两道防线。
@@ -164,13 +165,13 @@
   - ✅ 拷贝后逐文件 sha256 与 `warmups/echo/...`（v2.7.0）一致；`make test` / `make test-asan` 各 2 PASS / 0 FAIL
   - ✅ 反向验证：把 `test_smoke.c` 挪走后 `make test` 退出码非 0 并打印「空套件不许报全部通过」；`make e2e` 在 `tests/e2e/run.sh` 还没写时也明确失败
   - 📌 `tests/unit/test_smoke.c` 是**测试链自检**（不测业务逻辑，只证明 Makefile + Unity 通了），T1.2b 第一个真用例落地后可以直接删
-- [ ] **T1.1 观察真实报文**（30min）
+- [x] **T1.1 观察真实报文**（30min）
   - `nc -l 8080` 占端口 + `curl -v` 打过去，用 `od -c` / `strace -e trace=network -f` 把**内核侧真实字节**看清楚：每行结尾是 `\r\n`，请求头以空行结束
   - 验收：能把自己的请求报文逐字节打印出来（含 `\r` 不可见字符），并写下请求行三段 `METHOD SP TARGET SP VERSION` 各自的分隔符位置
 
 ### 阶段 B · 请求行与响应（约 3h）
 
-- [ ] **T1.2a 定接口**（30min｜[手写]）
+- [x] **T1.2a 定接口**（30min｜[手写]）
   - 交付 `src/httpd.h`（上限常量 + 版本串）、`src/http.h`：`struct request` 字段、错误码枚举、`http_parse_request_line()` / `http_find_header()` / `http_build_response_head()` 原型
   - 关键：接口先定，测试才有东西可调；返回错误码不 `exit()`
   - 验收：`make debug` 过（实现可以先 `return -1`）
@@ -195,14 +196,14 @@
 ### 阶段 C · header 解析与上限（约 3h）
 
 - [ ] **T1.3a 行切分器 `next_line`**（40min｜[手写]）★ 已知事故点
-  - CRLF 为主、裸 LF 宽容；**吃掉 `\r` 之后必须把行尾指针回退一格**，否则空行被算成「长度 1 的行」，所有正常请求全判 400（v1 的 B1 就是这么来的，见 `warmups/httpd/docs/03-审查报告.md`）
+  - CRLF 为主、裸 LF 宽容；**吃掉 `\r` 之后必须把行尾指针回退一格**，否则空行被算成「长度 1 的行」，所有正常请求全判 400（v1 的 B1 就是这么来的，见 `docs/archive/v1-审查报告.md`）
   - 验收：单测覆盖 `"A\r\n\r\n"`、`"A\n\n"`、`"A\r\nB"`（末行无换行）三种，断言每次返回的行长度与剩余偏移
 - [ ] **T1.3b header 结构 + 大小写不敏感**（40min）
   - 按 `name: value` 切；名字比较用 `strncasecmp`；**同名 header 允许重复**（不覆盖、不报错）
   - 验收：`hOsT:` / `cOnNeCtIoN: CLOSE` 能被认出；重复 `X-Dup` 两条都在
 - [ ] **T1.3c 上限防护**（40min）
-  - 单行 > 8KB 或总量 > 64KB → **431**；字段数 > 64 → 431；URI > 2KB → **414**；`Content-Length` > 1MB → **413**
-  - 关键：`RBUF = MAX_HEADER + MAX_LINE`，保证「先攒满再判错」过程永不越界
+  - 单行 > `MAX_LINE_LEN`、总量 > `MAX_HEADER_LEN`、字段数 > `MAX_HEADERS` → **431**；target > `MAX_PATH_LEN` → **414**；`Content-Length` > `MAX_BODY` → **413**（数字真源 `src/httpd.h`，语义真源 `CONTRACTS.md` §1）
+  - 关键：`RBUF_SIZE = MAX_HEADER_LEN + MAX_LINE_LEN`，保证「先攒满再判错」过程永不越界
   - 验收：单测里塞 20000 字节单行、70KB 总量，断言错误码；`make test-asan` 不得越界报警
 - [ ] **T1.3d 增量解析（短读现场）**（40min）
   - TCP 是字节流：一次 `read` 可能只到半个请求行。用 `roff/rlen` 记「读到哪、解析到哪」，`read` 返回后重新找 `\r\n\r\n`
@@ -263,7 +264,7 @@
   - 验收：把现象与证据写进 `README.md`「M1 已知缺陷（故意保留）」——这是 M2 前后对照的基线
 - [ ] **T1.7d 与 v1 的设计差异对照**（40min｜[手写]）
   - 逐个模块对比「我这次怎么写的 vs `warmups/httpd/v1` 怎么写的」：缓冲/行切分/路径安全/错误码/写循环；差异处写清「为什么这样更好」
-  - 交付 `docs/04-M1总结（根版）.md`：跑通的输出、卡住的地方（现象 → 根因 → 出处）、重写里改掉的
+  - 交付 `docs/reports/M1总结（根版）.md`：跑通的输出、卡住的地方（现象 → 根因 → 出处）、重写里改掉的
 - [ ] **T1.7e 自查清单**（30min）
   - `grep -rn 'strcpy\|strcat\|sprintf' src/` 空；`ls /proc/<pid>/fd | wc -l` 跑完全套后不变；`-h`/无参/坏 argv 不崩；`SIGTERM` → 正常退出 code=0
 - [ ] **T1.7f 提交与打基线 tag**（20min）
@@ -429,7 +430,7 @@
     同机同参数 C/Rust 各一遍，按 T4.5 的纪律记进 `docs/bench/results.tsv`
   - ⚠ **预期 Rust 版不会更快**（甚至略慢）：瓶颈在 syscall 与缓冲区拷贝，两边是同一批 syscall。
     别把「Rust 应该更快」当验收；出现大幅差异先怀疑自己多写了一次拷贝
-  - 产出 `warmups/httpd/docs/05-Rust对照.md`，必须回答 7 条：
+  - 产出 `docs/reports/Rust对照.md`，必须回答 7 条：
     ① 行数对比（`find src -name '*.rs' | xargs wc -l` vs `wc -l ../v2/*.c`）
     ② unsafe 行数与出现场合
     ③ 资源生命周期（C 靠约定 vs Rust 靠类型，各自容易漏什么）
@@ -553,3 +554,44 @@
 | M3 | 9h | 未开始 | 步骤已展开到 30–40min 粒度 |
 | M4 | 10h | 未开始 | 先修 `tests/bench.sh`（T4.0）；T4.2 之后的优化步骤等实测热点出来再细化 |
 | M5 | 4h | 未开始 | README 目录树必须先与磁盘对齐（T1.0a 已含） |
+
+---
+
+## 6. 当前状态与下一步（2026-10-13 文档重组后）
+
+### 重组做了什么
+
+- **资料分流**（入口 = `docs/README.md` 的文档地图，明确"同一件事只有一个真源"）：
+  `docs/rfc/`（活速查：报文/状态码/系统调用实测）· `docs/adr/`（决策）· `docs/method/`（方法论）·
+  `docs/reports/`（阶段性报告）· `docs/archive/`（**只读存档**：v1 审查报告、M1 总结、warmup 概念图、本次重构指令）。
+- **新增 `CONTRACTS.md`**：状态码表 + 函数契约 + 错误码映射 + 纪律 = **唯一契约真源**。
+  本文件里原来那份会飘的状态码表/上限常量表已改成**指针**。
+
+### 修掉的不一致（都是这次重组时**实测**出来的）
+
+1. `src/http.h` / `src/httpd.h` 注释里的 **501 → 405**（依据见 `docs/adr/002`）；
+2. `src/httpd.h` 的 `MAX_LINE_LEN` 注释写的 414 → **431**（414 只针对 request-target 过长）；
+3. `http.h` 的 `http_err` 是**匿名 typedef**，而 `main.c` 写 `enum http_err` → **编译不过**；
+   统一成 `typedef enum Tag {...} Name;`（tag + typedef 都给，两种写法都能用）；
+4. 本文件原来**又抄了一份**状态码表与上限常量，且数字与常量名都跟代码不一致
+   （写 8KB/64KB、`MAX_URI`/`MAX_PATH`；代码里是 4096/8192、`MAX_PATH_LEN`）→ 改成指针；
+5. `tests/unit/` 里 3 个 **0 字节**占位文件让 `make test` 链接失败（`undefined reference to main`）→ 已删，
+   等用例表落地再建（顺序：**先表后码**）；
+6. `test_request_line.c` 的 `RUN_TEST()` 少参数、`int main()` 触发 `-Wstrict-prototypes` → 修好；
+7. `Makefile` 的"空套件防护"原来只挡"一个 test 文件都没有"，**挡不住"有文件但 0 用例"** → 现在 Unity 打印 `0 Tests` 就判红。
+
+### 下一步（顺序别反）
+
+1. **决策 `docs/rfc/解析待定项.md` 里的 ⏳ 条目**（每条写"决定 + 出处"；语义级的补一篇 `docs/adr/`）——
+   这是写用例表的**前提**，因为用例的期望值必须有唯一出处；
+2. 写 **`tests/unit/test_request_line.c` 的用例表**（表驱动；现在那个 `1 Tests` 是零断言空壳，**不算测试**）；
+3. 按 `CONTRACTS.md` §2 实现 `src/http.c`（建议顺序：`http_scan_header_end` → `http_request_parse` → 响应侧三个）；
+4. `src/file.c`（T1.4）；
+5. `tests/e2e/run.sh`（T1.7a）。
+   另外三个用例表文件按语义分组，等对应表写好了再建：`test_headers.c` / `test_limits.c` / `test_path_decode.c`。
+
+### 当前红黄灯
+
+- 🔴 `make debug` 仍**链接失败**（`http.c` 的其余函数 + `file.c` 还没实现）—— 那串 `undefined reference` 就是待办清单；
+- 🟢 `make test` / `make test-asan` 绿（但注意上面第 2 条）；
+- 🟡 `tests/bench.sh` 移动后路径全错（T4.0），M4 之前必须修。

@@ -98,3 +98,61 @@ strace -f -e trace=recvfrom,sendto -s 300 -o /tmp/tr.txt ./httpd_v1 ...
 # 4) 优雅退出之后做泄漏检查（被 kill -9 的进程，LeakSanitizer/valgrind 根本不做退出检查）
 kill -TERM <pid>
 ```
+
+---
+
+## 8. 写解析 / 拼装函数时最常查的 4 张表（2026-10-13 重组时补）
+
+> 语义真源在根目录 `CONTRACTS.md`；本节只负责"报文长什么样 + 出处在哪"。
+
+### 8.1 报文骨架（实测字节，`od -c` / `cat -A`）
+
+请求（curl 8.5 发给 `nc -l` 的原始字节，88 字节）：
+
+```
+GET /index.html HTTP/1.1\r\n
+Host: 127.0.0.1:18080\r\n
+User-Agent: curl/8.5.0\r\n
+Accept: */*\r\n
+\r\n                     ← 空行：head 与 body 的分界（scan 找的就是它）
+```
+
+响应（本服务器发的）：
+
+```
+HTTP/1.1 200 OK\r\n
+Server: mini-httpd/0.1\r\n
+Content-Type: text/html; charset=utf-8\r\n
+Content-Length: 200\r\n
+Connection: close\r\n
+\r\n                     ← 空行之后才是 body
+```
+
+### 8.2 请求行三段与上限（数字真源：`src/httpd.h`）
+
+`METHOD SP request-target SP HTTP-version CRLF`（RFC 9112 §3，分隔符**只能是单个 SP**）
+
+| 段 | 常量 | 超了 / 不合法 |
+|---|---|---|
+| method | `MAX_METHOD_LEN` | 见 `CONTRACTS.md` §1；**语法类**边界仍待定（`解析待定项.md` #2 #3） |
+| request-target | `MAX_PATH_LEN` | 414 |
+| version | `MAX_VERSION_LEN` | 505（形如 `HTTP/x.y` 但不支持）／400（语法不合） |
+| 整行 | `MAX_LINE_LEN` | 431 |
+| 整个 head | `MAX_HEADER_LEN`；`RBUF_SIZE = MAX_HEADER_LEN + MAX_LINE_LEN` | 431（`main.c` 读满就早退，然后走 lingering close） |
+
+### 8.3 状态码速查
+
+**完整表（含"谁产生"）在 `CONTRACTS.md` §1**；最常查的一条：
+方法不在白名单 → **405 + `Allow: GET, HEAD`**（ADR-002）。
+超长 / 语法非法的方法回 400 还是 501 **还没定**，别在实现里偷偷选。
+
+### 8.4 行尾与宽容度（本项目已定）
+
+- 标准：行尾 `CRLF`，head 以 `\r\n\r\n` 结束；
+- 宽容：**也接受裸 LF**（`\n\n`）→ `http_scan_header_end()` 两种都认；
+- 空行 = head 结束，**不许**把它当成"长度为 1 的行"（v1 的 B1 事故：`docs/archive/v1-审查报告.md`）；
+- 解析函数只吃"已经切好的 head"（`head_len` 由扫描器给），**解析器里不要再判一次边界**。
+
+### 8.5 还没定的语法歧义
+
+全部在 `docs/rfc/解析待定项.md`。写解析器之前先把它清空 —— 否则用例表的期望值没有唯一出处。

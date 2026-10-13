@@ -6,7 +6,7 @@
 > 用 `git tag m1-blocking` / `m2-epoll` 做前后对照）。
 > - `v1/`：**只作参考与对照物**（885 行、`tests/run.sh` 55/55，2026-10-06），别再往里加功能；
 > - `v2/`：只剩一个 Makefile 骨架，**已被根 `src/` 取代，不要再往里写代码**。
-> - 本目录的 `docs/`（`02-man与RFC速查` / `03-审查报告` / `04-M1总结`）仍然有效，继续当资料读。
+> - 本目录原来的 `docs/` 已于 2026-10-13 重组：**RFC 速查 → `docs/rfc/RFC与系统调用速查.md`**（活文档，写解析器时查它）；**审查报告 / M1 总结 / 索引 → `docs/archive/`**（只读存档，见 `docs/archive/README.md`）。
 
 M1（阻塞版）与 M2（epoll ET 非阻塞版）**最初**的落地目录。**两个版本分别一个目录、分别一个 Makefile。**
 
@@ -20,7 +20,7 @@ M1（阻塞版）与 M2（epoll ET 非阻塞版）**最初**的落地目录。**
 warmups/httpd/
 ├── v1/     M1 阻塞式：main.c + http.c/h + file.c + httpd.h   → 依次一个连接
 ├── v2/     M2 epoll ET 非阻塞：同一功能，改成事件循环 + struct conn
-└── docs/   02-man与RFC速查.md / 03-审查报告.md / 04-M1总结.md
+└── （原 docs/ 已移出：速查 → docs/rfc/，历史 → docs/archive/）
 ```
 
 ## 版本定位

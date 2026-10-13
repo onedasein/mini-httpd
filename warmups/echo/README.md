@@ -13,7 +13,7 @@ src/
 ```
 
 拆成三个模块是为了**能被单元测试直接调用**：被测逻辑必须从 `main` 里出来，编成不含 `main` 的对象（`make` 里用 `filter-out src/main.c` 出库），否则链接测试程序会
-duplicate symbol。原理见 `docs/02-单元测试与端到端测试.md`。
+duplicate symbol。原理见 `docs/archive/warmup-echo-单元测试与端到端测试.md`（2026-10-13 从本目录移入存档）。
 
 # 用法
 ```bash
@@ -45,6 +45,7 @@ printf 'hi\n' | nc -N 127.0.0.1 8080    # 手工验回显
 `make check` 退出码为 0（debug 与 ASan 各跑一遍）。
 
 # 笔记
-- `docs/01-网络编程概念图.md` —— socket 生命周期、短读短写、`SO_REUSEADDR` 为什么在这台机器上复现不出来
-- `docs/02-单元测试与端到端测试.md` —— 这次分层的原理：缝、表驱动、纯函数与 I/O 边界、防假绿
+- `docs/archive/warmup-echo-网络编程概念图.md` —— socket 生命周期、短读短写、`SO_REUSEADDR` 为什么在这台机器上复现不出来
+- `docs/archive/warmup-echo-单元测试与端到端测试.md` —— 这次分层的原理：缝、表驱动、纯函数与 I/O 边界、防假绿
+  （两篇都在 `docs/archive/`，2026-10-13 从本目录移入存档。）
 - 踩过的坑与「修正」记在根 `TASKS.md` 的 T0.3

@@ -24,8 +24,8 @@ typedef struct {
     const char *method;                    /* 例："GET"，非 NUL 结尾 */
     size_t method_len;
     const char *target;                    /* 例："/index.html?x=1"，原始 request-target，非 NUL 结尾 */
-    size_t target_len;                     /* ← 2026-10-11 补：日志/排障要看原始请求行；path 已解码去 query，回不去 */
-    const char *version;                   /* 例："HTTP/1.1"，非 NUL 结尾 */
+    size_t target_len; /* ← 2026-10-11 补：日志/排障要看原始请求行；path 已解码去 query，回不去 */
+    const char *version; /* 例："HTTP/1.1"，非 NUL 结尾 */
     size_t version_len;
 
     /* 借用：header 数组本体与每个元素都指向 rbuf 内部 */
@@ -47,17 +47,17 @@ typedef struct {
 
 /* ---------- 错误码 ---------- */
 /* 每个值对应一个 HTTP 状态码（见注释）。 */
-enum http_err {
-    HTTP_OK = 0,  /* 200 OK              —— 解析成功 */
-    HTTP_ERR_BAD_REQUEST,       /* 400 Bad Request */
-    HTTP_ERR_METHOD,            /* 501 Not Implemented */
-    HTTP_ERR_URI_TOO_LONG,      /* 414 URI Too Long */
-    HTTP_ERR_VERSION,           /* 505 HTTP Version Not Supported */
-    HTTP_ERR_HEADER_TOO_LARGE,  /* 431 Request Header Fields Too Large */
-    HTTP_ERR_TOO_MANY_HEADERS,  /* 431 Request Header Fields Too Large */
-    HTTP_ERR_BODY_TOO_LARGE,    /* 413 Payload Too Large */
-    HTTP_ERR_INTERNAL,          /* 500 Internal Server Error */
-};
+typedef enum {
+    HTTP_OK = 0, /* 200 OK              —— 解析成功 */
+    HTTP_ERR_BAD_REQUEST, /* 400 Bad Request */
+    HTTP_ERR_METHOD, /* 405 Method Not Allowed（白名单外的方法；响应必须带 Allow，见 docs/adr/002） */
+    HTTP_ERR_URI_TOO_LONG, /* 414 URI Too Long */
+    HTTP_ERR_VERSION, /* 505 HTTP Version Not Supported */
+    HTTP_ERR_HEADER_TOO_LARGE, /* 431 Request Header Fields Too Large */
+    HTTP_ERR_TOO_MANY_HEADERS, /* 431 Request Header Fields Too Large */
+    HTTP_ERR_BODY_TOO_LARGE, /* 413 Payload Too Large */
+    HTTP_ERR_INTERNAL, /* 500 Internal Server Error */
+} http_err;
 
 /* ---------- 函数原型 ---------- */
 
@@ -68,7 +68,7 @@ enum http_err {
  *   req        — 输出参数，会被完全覆写；调用前无需初始化。
  *
  * 返回：
- *   HTTP_OK 表示成功；否则返回 enum http_err，调用方据此回对应状态码。
+ *   HTTP_OK 表示成功；否则返回 http_err，调用方据此回对应状态码。
  *
  * 是否修改入参：
  *   rbuf 不被修改；*req 会被写入。
@@ -78,7 +78,7 @@ enum http_err {
  *   http_request_free()）。
  *   失败时本函数保证不留下任何已分配内存，调用方无需清理。
  *   其余字段指向 rbuf，生命周期 ≤ rbuf，不应 free。 */
-enum http_err http_request_parse(const char *rbuf, size_t len, http_request *req);
+http_err http_request_parse(const char *rbuf, size_t len, http_request *req);
 
 /* 释放 http_request_parse 分配的资源（v1 中仅 path）。
  *
@@ -118,5 +118,5 @@ const char *http_content_type(const char *path);
 /* 一次性拼出响应头：状态行 + Server/Content-Type/Content-Length/Connection: close + extra + 空行。
  *   extra — 可塞额外一行，如 "Allow: GET, HEAD\r\n"；没有就传 NULL
  * 返回：写入的字节数；缓冲区放不下返回 -1（调用方回 500，别把截断的头发出去）。 */
-int http_build_response_head(char *out, size_t cap, int status, const char *ctype,
-                             long long body_len, const char *extra);
+int http_build_response_head(char *out, size_t cap, int status, const char *ctype, long long body_len,
+                             const char *extra);

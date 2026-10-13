@@ -4,7 +4,8 @@
 #pragma once
 // 各字段上限（用于解析阶段的早期拒绝，避免缓冲膨胀）
 
-// 请求方法 （GET/POST/...）,超出返回501 Not Implemented
+// 请求方法名上限；不在白名单（PUT/DELETE/…）→ 405 + Allow（见 docs/adr/002）
+// 「method 语法非法 / 超长」回 400 还是 501 仍待定 → docs/rfc/解析待定项.md #3
 #define MAX_METHOD_LEN  16
 
 // 请求目标（path + query），超出返回414 URI Too Long
@@ -13,7 +14,7 @@
 // HTTP版本串("HTTP/1.1"), 超出返回505 HTTP Version Not Supported
 #define MAX_VERSION_LEN 16
 
-// 单行（请求行或任意header行），超出返回414 URI Too Long
+// 单行（请求行或任意 header 行）上限；超了 → 431（不是 414：414 只针对 request-target 过长）
 #define MAX_LINE_LEN    4096
 
 // 所有header行累计最大长度；超出返回431 Request Header Fields Too Large

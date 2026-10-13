@@ -42,9 +42,9 @@
 #include <unistd.h>
 
 /* 命令行默认值：三段都可以省。e2e 脚本与 tests/bench.sh 都按这个约定调用，别乱改。 */
-#define DEFAULT_IP   "127.0.0.1"
-#define DEFAULT_PORT 8080
-#define DEFAULT_ROOT "tests/www"
+#define DEFAULT_IP                "127.0.0.1"
+#define DEFAULT_PORT              8080
+#define DEFAULT_ROOT              "tests/www"
 
 /* 「方法不允许」回哪个码：M1 验收契约（TASKS.md）+ v1 的 55 条断言都要求
  *   405 + "Allow: GET, HEAD"。
@@ -57,16 +57,14 @@
 static const char *g_root_real;              /* 文档根 realpath，启动时算一次 */
 static volatile sig_atomic_t g_stop = 0;     /* 信号 handler 只写它（异步信号安全） */
 
-static void on_stop(int sig)
-{
+static void on_stop(int sig) {
     (void)sig;
     g_stop = 1;      /* handler 里不 printf、不 free、不 malloc */
 }
 
 /* ------------------------------------------------------------ 底层 IO 包装
  * M2 的换装点：T2.2 只把这三个函数改成「非阻塞 + EAGAIN 语义」，别的都不动。 */
-static ssize_t conn_read(int fd, void *buf, size_t n)
-{
+static ssize_t conn_read(int fd, void *buf, size_t n) {
     for (;;) {
         ssize_t r = recv(fd, buf, n, 0);
         if (r >= 0) return r;                 /* >0 字节数；0 = 对端关闭（EOF） */
@@ -77,14 +75,16 @@ static ssize_t conn_read(int fd, void *buf, size_t n)
 
 /* 写满为止（write 的返回值可能小于请求长度 —— 大文件必现）。
  * MSG_NOSIGNAL 是第 1 道防线：对端已走时只返回 EPIPE，不发 SIGPIPE。 */
-static int write_all(int fd, const void *buf, size_t n)
-{
+static int write_all(int fd, const void *buf, size_t n) {
     const char *p = buf;
     size_t off = 0;
 
     while (off < n) {
         ssize_t w = send(fd, p + off, n - off, MSG_NOSIGNAL);
-        if (w > 0) { off += (size_t)w; continue; }
+        if (w > 0) {
+            off += (size_t)w;
+            continue;
+        }
         if (w < 0 && errno == EINTR) continue;
         return -1;    /* EPIPE / ECONNRESET 是常态：关这条连接就行，不是致命错误 */
     }
@@ -92,8 +92,7 @@ static int write_all(int fd, const void *buf, size_t n)
 }
 
 /* 普通文件用 read(2)，别用 recv(2)（对普通文件 recv 会 ENOTSOCK） */
-static ssize_t file_read(int fd, void *buf, size_t n)
-{
+static ssize_t file_read(int fd, void *buf, size_t n) {
     for (;;) {
         ssize_t r = read(fd, buf, n);
         if (r >= 0) return r;
@@ -113,8 +112,7 @@ static ssize_t file_read(int fd, void *buf, size_t n)
  *
  * 必须有界：一个只连不发、或无限发送的客户端不能把服务器挂在这里。
  * SO_RCVTIMEO 200ms + 最多 1MB 双重上限。 */
-static void conn_finish(int cfd)
-{
+static void conn_finish(int cfd) {
     struct timeval tv;
     char tmp[4096];
     long long budget = 1024 * 1024;
@@ -133,32 +131,31 @@ static void conn_finish(int cfd)
 
 /* ------------------------------------------------------------------ 响应 */
 
-static void send_error(int cfd, int status, const char *extra, int head_only)
-{
+static void send_error(int cfd, int status, const char *extra, int head_only) {
     char body[256];
     int n = snprintf(body, sizeof body,
                      "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
                      "<title>%d %s</title></head>\n<body><h1>%d %s</h1><hr>"
                      "<p>%s</p></body></html>\n",
-                     status, http_status_text(status),
-                     status, http_status_text(status), SERVER_VERSION);
+                     status, http_status_text(status), status, http_status_text(status), SERVER_VERSION);
     if (n < 0) n = 0;
     if ((size_t)n >= sizeof body) n = (int)(sizeof body - 1);
 
     char head[1024];
-    int hn = http_build_response_head(head, sizeof head, status, "text/html; charset=utf-8",
-                                      (long long)n, extra);
+    int hn = http_build_response_head(head, sizeof head, status, "text/html; charset=utf-8", (long long)n, extra);
     if (hn < 0) return;                        /* 拼不下是 bug，但此刻没法再回 500，只能放弃 */
     if (write_all(cfd, head, (size_t)hn) < 0) return;
     if (!head_only && n > 0) (void)write_all(cfd, body, (size_t)n);
     /* 错误页只说状态码，不回显请求路径/绝对路径 —— 不泄漏服务器信息 */
 }
 
-static void send_file(int cfd, const struct static_file *sf, const char *ctype, int head_only)
-{
+static void send_file(int cfd, const struct static_file *sf, const char *ctype, int head_only) {
     char head[1024];
     int hn = http_build_response_head(head, sizeof head, 200, ctype, sf->size, NULL);
-    if (hn < 0) { send_error(cfd, 500, NULL, head_only); return; }
+    if (hn < 0) {
+        send_error(cfd, 500, NULL, head_only);
+        return;
+    }
     if (write_all(cfd, head, (size_t)hn) < 0) return;
     if (head_only) return;                     /* HEAD：只发头，Content-Length 仍是真实大小 */
 
@@ -177,8 +174,7 @@ static void send_file(int cfd, const struct static_file *sf, const char *ctype, 
 
 /* method/target 是未信任输入，而且是「带长度的借用切片」：
  * 控制字符一律打掉，免得客户端用 \r 或 ANSI 序列伪造日志行、把终端搞花。 */
-static void sanitize(char *dst, size_t cap, const char *src, size_t len)
-{
+static void sanitize(char *dst, size_t cap, const char *src, size_t len) {
     size_t i = 0;
 
     if (cap == 0) return;
@@ -189,9 +185,8 @@ static void sanitize(char *dst, size_t cap, const char *src, size_t len)
     dst[i] = '\0';
 }
 
-static void log_request(const char *peer, const char *method, size_t method_len,
-                        const char *target, size_t target_len, int status, long long bytes)
-{
+static void log_request(const char *peer, const char *method, size_t method_len, const char *target, size_t target_len,
+                        int status, long long bytes) {
     char m[32];
     char t[256];
 
@@ -203,30 +198,42 @@ static void log_request(const char *peer, const char *method, size_t method_len,
 
 /* ------------------------------------------------------------ 错误码映射
  * 整个程序只有这两张表：协议层/文件层只报「哪一类错」，由 main.c 决定回哪个码。 */
-static int status_from_parse_err(enum http_err e)
-{
+static int status_from_parse_err(http_err e) {
     switch (e) {
-    case HTTP_OK:                   return 200;
-    case HTTP_ERR_BAD_REQUEST:      return 400;
-    case HTTP_ERR_METHOD:           return STATUS_METHOD_NOT_ALLOWED;   /* 见文件顶部的说明 */
-    case HTTP_ERR_URI_TOO_LONG:     return 414;
-    case HTTP_ERR_HEADER_TOO_LARGE: return 431;
-    case HTTP_ERR_TOO_MANY_HEADERS: return 431;
-    case HTTP_ERR_BODY_TOO_LARGE:   return 413;
-    case HTTP_ERR_VERSION:          return 505;
-    case HTTP_ERR_INTERNAL:         return 500;
+        case HTTP_OK:
+            return 200;
+        case HTTP_ERR_BAD_REQUEST:
+            return 400;
+        case HTTP_ERR_METHOD:
+            return STATUS_METHOD_NOT_ALLOWED;   /* 见文件顶部的说明 */
+        case HTTP_ERR_URI_TOO_LONG:
+            return 414;
+        case HTTP_ERR_HEADER_TOO_LARGE:
+            return 431;
+        case HTTP_ERR_TOO_MANY_HEADERS:
+            return 431;
+        case HTTP_ERR_BODY_TOO_LARGE:
+            return 413;
+        case HTTP_ERR_VERSION:
+            return 505;
+        case HTTP_ERR_INTERNAL:
+            return 500;
     }
     return 400;      /* 解析失败一律算客户端问题：宁可 400，别回 500 把锅甩给自己 */
 }
 
-static int status_from_file_err(enum file_status e)
-{
+static int status_from_file_err(enum file_status e) {
     switch (e) {
-    case FILE_OK:        return 200;
-    case FILE_BAD_PATH:  return 400;
-    case FILE_FORBIDDEN: return 403;
-    case FILE_NOT_FOUND: return 404;
-    case FILE_IO_ERROR:  return 500;
+        case FILE_OK:
+            return 200;
+        case FILE_BAD_PATH:
+            return 400;
+        case FILE_FORBIDDEN:
+            return 403;
+        case FILE_NOT_FOUND:
+            return 404;
+        case FILE_IO_ERROR:
+            return 500;
     }
     return 500;
 }
@@ -235,9 +242,8 @@ static int status_from_file_err(enum file_status e)
 
 /* 返回：1 = 接收队列里可能还有没读完的字节 → 调用方**先 conn_finish(cfd) 再 close**；
  *       0 = 收干净了，直接 close 就行。 */
-static int handle_conn(int cfd, const char *peer, char *rbuf)
-{
-    http_request req;                 /* 注意：http.h 里是匿名 typedef，没有 struct tag —— 别写 struct http_request */
+static int handle_conn(int cfd, const char *peer, char *rbuf) {
+    http_request req; /* 注意：http.h 里是匿名 typedef，没有 struct tag —— 别写 struct http_request */
     struct static_file sf;
     size_t rlen = 0;
     size_t scan = 0;
@@ -246,7 +252,7 @@ static int handle_conn(int cfd, const char *peer, char *rbuf)
     int drain = 0;
     int status = 500;
     const char *extra = NULL;
-    enum http_err pe;
+    http_err pe;
     enum file_status fe;
     ssize_t n;
 
@@ -257,18 +263,24 @@ static int handle_conn(int cfd, const char *peer, char *rbuf)
     /* 阶段 1：攒到「空行」为止。
      * 协议知识全在 http_scan_header_end 里，这里只负责「再读一点 / 到上限就别读了」。 */
     for (;;) {
-        if (rlen >= RBUF_SIZE) { over_limit = 1; break; }
+        if (rlen >= RBUF_SIZE) {
+            over_limit = 1;
+            break;
+        }
         n = conn_read(cfd, rbuf + rlen, RBUF_SIZE - rlen);
-        if (n <= 0) goto done;                 /* 没发完就断了/出错了：静默关闭，什么都不回 */
+        if (n <= 0) goto done; /* 没发完就断了/出错了：静默关闭，什么都不回 */
         rlen += (size_t)n;
         if (http_scan_header_end(rbuf, rlen, &scan, &head_len)) break;
-        if (rlen >= MAX_HEADER_LEN) { over_limit = 1; break; }   /* 提前判 431，别等 rbuf 满 */
+        if (rlen >= MAX_HEADER_LEN) {
+            over_limit = 1;
+            break;
+        } /* 提前判 431，别等 rbuf 满 */
     }
 
     if (over_limit) {
         send_error(cfd, 431, NULL, 0);
         log_request(peer, NULL, 0, NULL, 0, 431, 0);
-        drain = 1;                     /* 我们是「读一半就走」的：对端大概率还在写 */
+        drain = 1; /* 我们是「读一半就走」的：对端大概率还在写 */
         goto done;
     }
 
@@ -279,7 +291,7 @@ static int handle_conn(int cfd, const char *peer, char *rbuf)
         extra = (status == STATUS_METHOD_NOT_ALLOWED) ? "Allow: GET, HEAD\r\n" : NULL;
         send_error(cfd, status, extra, req.head_only);
         log_request(peer, req.method, req.method_len, req.target, req.target_len, status, 0);
-        drain = (req.content_length > 0);   /* 第一版不读 body：声明了 body 就还有没读的字节 */
+        drain = (req.content_length > 0); /* 第一版不读 body：声明了 body 就还有没读的字节 */
         goto done;
     }
 
@@ -294,20 +306,18 @@ static int handle_conn(int cfd, const char *peer, char *rbuf)
     }
 
     send_file(cfd, &sf, http_content_type(sf.real), req.head_only);
-    log_request(peer, req.method, req.method_len, req.target, req.target_len,
-                200, req.head_only ? 0 : sf.size);
+    log_request(peer, req.method, req.method_len, req.target, req.target_len, 200, req.head_only ? 0 : sf.size);
     drain = (req.content_length > 0);
 
-done:                                  /* 单一出口：所有分支都从这里出去，fd/free 不会漏 */
-    if (sf.fd >= 0) close(sf.fd);      /* sf.fd 归 handle_conn 管；cfd 归 main 管 */
+done: /* 单一出口：所有分支都从这里出去，fd/free 不会漏 */
+    if (sf.fd >= 0) close(sf.fd); /* sf.fd 归 handle_conn 管；cfd 归 main 管 */
     http_request_free(&req);
     return drain;
 }
 
 /* ------------------------------------------------------------------ 启动 */
 
-static void usage(const char *argv0, FILE *out)
-{
+static void usage(const char *argv0, FILE *out) {
     fprintf(out,
             "用法: %s [ip] [port] [www-root]\n"
             "  默认: %s %d %s\n"
@@ -317,9 +327,8 @@ static void usage(const char *argv0, FILE *out)
 
 /* 解析 argv（三段都可省）。失败只返回错误码，**不 exit** —— 由 main 决定怎么退出。
  * 返回：0 = 成功；1 = 请求帮助（-h/--help）；-1 = 参数非法。 */
-static int parse_args(int argc, char **argv, const char **ip, int *port, const char **root)
-{
-    *ip   = DEFAULT_IP;
+static int parse_args(int argc, char **argv, const char **ip, int *port, const char **root) {
+    *ip = DEFAULT_IP;
     *port = DEFAULT_PORT;
     *root = DEFAULT_ROOT;
 
@@ -342,13 +351,15 @@ static int parse_args(int argc, char **argv, const char **ip, int *port, const c
     return 0;
 }
 
-static int make_listener(const char *ip, int port)
-{
+static int make_listener(const char *ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     int on = 1;
     struct sockaddr_in addr;
 
-    if (fd < 0) { perror("socket"); return -1; }
+    if (fd < 0) {
+        perror("socket");
+        return -1;
+    }
 
     /* SO_REUSEADDR：让 TIME_WAIT 的旧四元组不挡住重启（M0 的 echo 里已实测过它的边界） */
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) < 0) {
@@ -379,8 +390,7 @@ static int make_listener(const char *ip, int port)
     return fd;
 }
 
-static void describe_peer(int fd, char *out, size_t cap)
-{
+static void describe_peer(int fd, char *out, size_t cap) {
     struct sockaddr_in sa;
     socklen_t sl = sizeof sa;
 
@@ -392,12 +402,11 @@ static void describe_peer(int fd, char *out, size_t cap)
         }
         snprintf(out, cap, "%s:%u", ip, (unsigned)ntohs(sa.sin_port));
     } else {
-        snprintf(out, cap, "?");      /* 取不到对端信息也不能让日志把服务搞崩 */
+        snprintf(out, cap, "?"); /* 取不到对端信息也不能让日志把服务搞崩 */
     }
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     const char *ip = NULL;
     const char *root = NULL;
     int port = 0;
@@ -411,8 +420,14 @@ int main(int argc, char **argv)
 
     /* 1) argv */
     pa = parse_args(argc, argv, &ip, &port, &root);
-    if (pa == 1) { usage(argv[0], stdout); return 0; }
-    if (pa < 0) { usage(argv[0], stderr); return 2; }
+    if (pa == 1) {
+        usage(argv[0], stdout);
+        return 0;
+    }
+    if (pa < 0) {
+        usage(argv[0], stderr);
+        return 2;
+    }
 
     /* 2) 文档根在 bind 之前解析一次，失败就别起服务了 */
     if (realpath(root, root_real) == NULL) {
@@ -463,7 +478,7 @@ int main(int argc, char **argv)
         int cfd = accept(lfd, NULL, NULL);
 
         if (cfd < 0) {
-            if (errno == EINTR || errno == ECONNABORTED) continue;   /* EINTR：该看 g_stop 了 */
+            if (errno == EINTR || errno == ECONNABORTED) continue; /* EINTR：该看 g_stop 了 */
             if (errno == EMFILE || errno == ENFILE) {
                 /* fd 耗尽：记日志 + 短暂退避，**绝不退出** —— 退出等于把整个服务丢了 */
                 struct timespec ts;
@@ -475,14 +490,14 @@ int main(int argc, char **argv)
                 continue;
             }
             fprintf(stderr, "accept: %s\n", strerror(errno));
-            continue;                          /* 连接级错误不该杀服务器 */
+            continue; /* 连接级错误不该杀服务器 */
         }
 
         describe_peer(cfd, peer, sizeof peer);
         if (handle_conn(cfd, peer, rbuf) != 0) {
-            conn_finish(cfd);                  /* 收尾：别让对端还在写的字节把响应顶掉（见 conn_finish） */
+            conn_finish(cfd); /* 收尾：别让对端还在写的字节把响应顶掉（见 conn_finish） */
         }
-        close(cfd);                            /* cfd 的生命周期只归 main 管 */
+        close(cfd); /* cfd 的生命周期只归 main 管 */
     }
 
     printf("shutdown: 收到信号，关闭监听 fd 并正常退出\n");
