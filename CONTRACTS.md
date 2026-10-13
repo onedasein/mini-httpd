@@ -11,20 +11,20 @@
 | 码 | 触发条件 | 谁产生 | 出处 |
 |---|---|---|---|
 | 200 | 文件存在（目录请求补 `index.html`） | `file.c` → `main.c` | RFC 9110 §15.3.1 |
-| 400 | 请求行语法错；HTTP/1.1 缺 `Host`；`..` 穿越；`%00` / 反斜杠；版本字段语法不合 | `http.c` / `file.c` | RFC 9112 §2.2、§3.2 |
+| 400 | 请求行语法错；HTTP/1.1 缺 `Host`；`..` 穿越；`%00` / 反斜杠；版本字段语法不合;三段之间多个连续空格(`GET  /  HTTP/1.1`);用\t当分隔符；HTTP/1（缺次版本）/版本字段带尾随空格；版本字段为空；target非origin-form`(http://host/x、*)`；行尾只有`\r`没有`\n`；重复`Content-Length`且值不同 | `http.c` / `file.c` | RFC 9112 §2.2、§3.2 §3 §2.3 § 6.3 |
 | 403 | `realpath` 后越出文档根；`EACCES` | `file.c` | RFC 9110 §15.5.4 |
 | 404 | 文件不存在；目录没有 `index.html` | `file.c` | RFC 9110 §15.5.5 |
-| **405** | **方法合法但不在白名单**（PUT / DELETE / …），响应**必须带** `Allow: GET, HEAD` | `http.c` 报 `HTTP_ERR_METHOD` → `main.c` 映射 | RFC 9110 §15.5.6、**ADR-002** |
+| 405 | 方法合法但不在白名单（PUT / DELETE / …），响应必须带Allow: GET, HEAD | `http.c` 报 `HTTP_ERR_METHOD` → `main.c` 映射 | RFC 9110 §15.5.6、**ADR-002** |
 | 413 | `Content-Length > MAX_BODY`（第一版不收 body） | `http.c` | RFC 9110 §15.5.14 |
 | 414 | `request-target > MAX_PATH_LEN` | `http.c` | RFC 9110 §15.5.16 |
 | 431 | 单行 > `MAX_LINE_LEN`；head 总量 > `MAX_HEADER_LEN`；字段数 > `MAX_HEADERS` | `main.c`（早退）+ `http.c` | RFC 9110 §15.5.23 |
-| 505 | 版本形如 `HTTP/x.y` 但不受支持 | `http.c` | RFC 9110 §15.6.6 |
 | 500 | 内部分配失败（`HTTP_ERR_INTERNAL`） | `http.c` → `main.c` | RFC 9110 §15.6.1 |
+| 501 | method为小写`get`; method超长(> `MAX_METHOD_LEN`)| http.c | RFC 9110 §9.1 |
+| 505 | 版本形如 `HTTP/x.y` 但不受支持 | `http.c` | RFC 9110 §15.6.6 |
+
 | **静默关闭**（一个字节都不回） | 请求没发完就 EOF / 读写出错 | `main.c` | — |
 
-**仍待定**（定了写进本表 + 一篇 ADR，再去动用例表）：`HTTP/1` 缺次版本、小写 `get`、多空格 / `\t` 分隔、
-非 origin-form 的 target、重复 `Content-Length`、`Content-Length: 0` 与"没有该 header"的区分
-→ 全部列在 `docs/rfc/解析待定项.md`。
+`Content-Length:0`与没有该header的情况，正常处理，无错误码
 
 ---
 

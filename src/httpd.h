@@ -5,7 +5,8 @@
 // 各字段上限（用于解析阶段的早期拒绝，避免缓冲膨胀）
 
 // 请求方法名上限；不在白名单（PUT/DELETE/…）→ 405 + Allow（见 docs/adr/002）
-// 「method 语法非法 / 超长」回 400 还是 501 仍待定 → docs/rfc/解析待定项.md #3
+// 「method超长」回 501
+
 #define MAX_METHOD_LEN  16
 
 // 请求目标（path + query），超出返回414 URI Too Long

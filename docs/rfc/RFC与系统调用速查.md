@@ -82,6 +82,7 @@ timeout 5 bash -c "printf 'hi\n' | nc -N 127.0.0.1 8080"; echo $? # 0
 | 请求体声明过大（>1MB，本版不支持 body） | 413 | RFC 9110 §15.5.14 |
 | 方法不在白名单 | 405 + `Allow` | RFC 9110 §15.5.6（必须给 `Allow`） |
 | 版本不认识但形如 `HTTP/x.y` | 505 | RFC 9110 §15.6.6 |
+| method为get，而非GET | 501(Not Implemented) | RFC9110 §9.1 |
 
 行尾：标准是 CRLF；宽容实现也接受裸 LF —— 本项目两种都收（`http_scan_header_end`）。
 `RFC 9112` 取代了老的 `7230`（报文语法），`RFC 9110` 是语义。
