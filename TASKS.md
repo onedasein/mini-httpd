@@ -179,10 +179,10 @@
   - 交付 `tests/unit/test_request_line.c`：表驱动（一行一个输入 → 期望错误码/期望字段），至少覆盖 `GET / HTTP/1.1`、多空格、缺 version、`GARBAGE\r\n`、裸 LF
   - 关键：**这张用例表是 M2+ Rust 对照要原样翻译的那张**，字段名与错误码别随手改
   - 验收：`make test` 里能看到断言失败（红），不是编译错误
-- [ ] **T1.2c 实现请求行解析**（40min）
+- [x] **T1.2c 实现请求行解析**（40min）
   - 只做解析，不做 I/O：在固定 `char buf[]` 上工作，全程长度 + `memchr`，不用 `strtok`/`strcpy`
   - 验收：`make test` 绿；`make test-asan` 也绿
-- [ ] **T1.2d 响应拼装**（40min）
+- [x] **T1.2d 响应拼装**（40min）
   - `http_build_response_head()`：状态行 + `Content-Type` / `Content-Length` / `Connection: close` / `Server`；**用 `snprintf` 并检查截断**（返回「本该写入的长度」要和 cap 比）
   - 验收：单测断言「响应头以 `\r\n\r\n` 结束」「Content-Length 等于给定 body 长度」
 - [x] **T1.2e listener + 串行 accept 主循环**（40min）— ✅ 2026-10-11 完成（`src/main.c` 已写全，I/O 与生命周期部分）
@@ -195,20 +195,20 @@
 
 ### 阶段 C · header 解析与上限（约 3h）
 
-- [ ] **T1.3a 行切分器 `next_line`**（40min｜[手写]）★ 已知事故点
+- [x] **T1.3a 行切分器 `next_line`**（40min｜[手写]）★ 已知事故点
   - CRLF 为主、裸 LF 宽容；**吃掉 `\r` 之后必须把行尾指针回退一格**，否则空行被算成「长度 1 的行」，所有正常请求全判 400（v1 的 B1 就是这么来的，见 `docs/archive/v1-审查报告.md`）
   - 验收：单测覆盖 `"A\r\n\r\n"`、`"A\n\n"`、`"A\r\nB"`（末行无换行）三种，断言每次返回的行长度与剩余偏移
-- [ ] **T1.3b header 结构 + 大小写不敏感**（40min）
+- [x] **T1.3b header 结构 + 大小写不敏感**（40min）
   - 按 `name: value` 切；名字比较用 `strncasecmp`；**同名 header 允许重复**（不覆盖、不报错）
   - 验收：`hOsT:` / `cOnNeCtIoN: CLOSE` 能被认出；重复 `X-Dup` 两条都在
-- [ ] **T1.3c 上限防护**（40min）
+- [x] **T1.3c 上限防护**（40min）
   - 单行 > `MAX_LINE_LEN`、总量 > `MAX_HEADER_LEN`、字段数 > `MAX_HEADERS` → **431**；target > `MAX_PATH_LEN` → **414**；`Content-Length` > `MAX_BODY` → **413**（数字真源 `src/httpd.h`，语义真源 `CONTRACTS.md` §1）
   - 关键：`RBUF_SIZE = MAX_HEADER_LEN + MAX_LINE_LEN`，保证「先攒满再判错」过程永不越界
   - 验收：单测里塞 20000 字节单行、70KB 总量，断言错误码；`make test-asan` 不得越界报警
-- [ ] **T1.3d 增量解析（短读现场）**（40min）
+- [x] **T1.3d 增量解析（短读现场）**（40min）
   - TCP 是字节流：一次 `read` 可能只到半个请求行。用 `roff/rlen` 记「读到哪、解析到哪」，`read` 返回后重新找 `\r\n\r\n`
   - 验收：e2e 里「请求逐字节到达（每字节间隔 20ms）」仍 200；单测断言「喂半个请求 → 需要更多数据」而不是报 400
-- [ ] **T1.3e 三态回归 + ASan**（20min）
+- [x] **T1.3e 三态回归 + ASan**（20min）
   - 跑 `test` + `test-asan`，把 400/431/414 三种拒绝路径都覆盖到；确认没有 `strcpy/strcat/sprintf`（grep 一次）
   - 验收：两套全绿 + grep 输出为空
 

@@ -121,5 +121,6 @@ const char *http_content_type(const char *path);
 /* 一次性拼出响应头：状态行 + Server/Content-Type/Content-Length/Connection: close + extra + 空行。
  *   extra — 可塞额外一行，如 "Allow: GET, HEAD\r\n"；没有就传 NULL
  * 返回：写入的字节数；缓冲区放不下返回 -1（调用方回 500，别把截断的头发出去）。 */
-int http_build_response_head(char *out, size_t cap, int status, const char *ctype, long long body_len,
-                             const char *extra);
+int http_build_response_head(
+    char *out, size_t cap, int status, const char *ctype, long long body_len, const char *extra
+);
