@@ -17,7 +17,7 @@ typedef enum {
     FILE_OK = 0,       /* 200 */
     FILE_BAD_PATH,     /* 400：路径本身非法（".." 段、反斜杠、不以 '/' 开头） */
     FILE_FORBIDDEN,    /* 403：realpath 之后逃出了文档根，或 EACCES */
-    FILE_NOT_FOUND,    /* 404：ENOENT / 目录（第一版明确不做目录列表） */
+    FILE_NOT_FOUND,    /* 404：ENOENT / ENOTDIR；目录请求补 index.html 后仍不存在（不做目录列表） */
     FILE_IO_ERROR      /* 500：其它 open/fstat 失败 */
 } file_status;
 
@@ -33,6 +33,10 @@ typedef struct {
  *
  * 成功：返回 FILE_OK，out->fd 已打开（调用方负责 close）。
  * 失败：返回对应错误码，且**不得留下已打开的 fd**（这条是「压测前后 fd 数一致」的前提）。
+ *
+ * 「目录请求补 index.html」：url_path 以 '/' 结尾时（如 "/" 或 "/sub/"）会先补 index.html
+ * 再 realpath。补完仍不存在的目录 → 404 —— 这**不是**目录列表，「第一版不做目录列表」依旧成立。
+ *（出处：CONTRACTS.md §1 的 200 行；e2e 的 /sub/ 与 /nolist/ 两条用例分别钉住这两种行为。）
  *
  * 双保险（只做一条都不够）：
  *   ① 逐段拒绝 ".."、拒绝反斜杠 —— 快速失败，且不会误杀 a..b 这种合法文件名；

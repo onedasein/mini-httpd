@@ -224,39 +224,43 @@
   - 第一层：自己折叠 `.` / `..`（越出根就 400）；第二层：`realpath()` 结果必须仍以文档根 realpath 为前缀，否则 403
   - 坑：`realpath` 在严格 `-std=c11` 下要 `_XOPEN_SOURCE 700` + `<stdlib.h>`，否则隐式声明被 `-Werror` 挡住
   - 验收：`curl --path-as-is 'http://127.0.0.1:8080/../Makefile'` → 400 **且不泄漏内容**；绝对/相对符号链接逃逸 → 403；www 内正常软链 → 200
-- [ ] **T1.4d 错误码映射收口**（40min）
+- [x] **T1.4d 错误码映射收口**（40min）
   - 把 `ENOENT → 404`、`EACCES → 403`、坏语法 → 400 收进一个映射函数；400 响应体不含路径等内部信息
   - 验收：单测表驱动喂 `errno` → 状态码；e2e 的 404/403/400 组全绿
-- [ ] **T1.4e 安全 e2e 组**（30min）
+- [x] **T1.4e 安全 e2e 组**（30min）
   - 在 `tests/e2e/run.sh` 里补：穿越三种写法、`%00`、符号链接三条、目录无 index、query 串被忽略
   - 关键：临时素材（10MB 文件、符号链接）跑完必须删掉，别提交进仓库；临时目录一建好先写进 `.git/info/exclude`
   - 验收：这一组单独跑全绿
 
 ### 阶段 E · 完整写与背压（约 1.5h）
 
-- [ ] **T1.5a 写满循环**（40min）
+- [x] **T1.5a 写满循环**（40min）
   - `send(MSG_NOSIGNAL)` 循环到写完；处理短写；`SIG_IGN(SIGPIPE)` 兜底；`EINTR` 重试
   - 验收：单测里用一个 `socketpair` 把它逼到短写（对端 `SO_RCVBUF` 压到 4096 且不读），断言「最终全部写出」
-- [ ] **T1.5b 10MB 完整传输 + 背压**（40min｜[可委托] 造数据）
+- [x] **T1.5b 10MB 完整传输 + 背压**（40min｜[可委托] 造数据）
   - 造 10MB 文件，客户端 `curl -o out.bin` 后 `cmp` 一致；再把客户端 `SO_RCVBUF=4096` + 间歇停读，逼出「部分写」路径
   - 验收：`cmp` 无差异；慢读场景仍能收满 `10485760/10485760`
-- [ ] **T1.5c 客户端半路 RST**（20min）
+- [x] **T1.5c 客户端半路 RST**（20min）
   - 客户端发一半就 RST，服务端不得退出、不得泄漏 fd；RST 之后仍能正常服务下一个请求
   - 验收：e2e 里断言「RST 之后 `/index.html` 仍 200」
 
 ### 阶段 F · HTTP 语义细节（约 1h）
 
-- [ ] **T1.6a HEAD**（20min）：不发 body，但 `Content-Length` 仍是文件大小（`curl -I` 只应收到头）
-- [ ] **T1.6b 方法白名单**（20min）：`PUT`/`DELETE`/其它 → **405 + `Allow: GET, HEAD`**
-- [ ] **T1.6c 版本与连接语义**（30min）：`HTTP/2.0` → 505；HTTP/1.1 缺 `Host` → 400；HTTP/1.0 默认短连接；任何响应都带 `Connection: close`；裸 LF 行尾宽容接受
+- [x] **T1.6a HEAD**（20min）：不发 body，但 `Content-Length` 仍是文件大小（`curl -I` 只应收到头）
+- [x] **T1.6b 方法白名单**（20min）：`PUT`/`DELETE`/其它 → **405 + `Allow: GET, HEAD`**
+- [x] **T1.6c 版本与连接语义**（30min）：`HTTP/2.0` → 505；HTTP/1.1 缺 `Host` → 400；HTTP/1.0 默认短连接；任何响应都带 `Connection: close`；裸 LF 行尾宽容接受
   - 验收：这四条各有一条 e2e 断言（`raw()` 直接灌原始报文，别只靠 `curl`）
 
 ### 阶段 G · 收口与对照（约 3.5h）
 
-- [ ] **T1.7a 把 v1 的 55 条验收脚本移植到根**（40min｜[可委托]）
+- [x] **T1.7a 把 v1 的 55 条验收脚本移植到根**（40min｜[可委托]）— ✅ 2026-10-14 完成
   - 源：`warmups/httpd/v1/tests/run.sh`（**改脚本 = 改题目**，语义断言一条都不许放宽）；适配点：根 `./build/debug/mini-httpd`、文档根 `tests/www`、`BIN` 绝对化、`set -o pipefail`、PASS/FAIL 计数
-  - 验收：`make e2e` 报出总条数（≥55）且失败为 0
-- [ ] **T1.7b 三跑体检**（40min）
+  - ✅ 落地 `tests/e2e/run.sh`：**61 条断言**，按节分 —— A 请求行+响应 · B 静态文件与 MIME · C 路径安全 · D 字段大小写/重复/上限 · E 10MB 完整性 · F 背压慢读 · G 中途 RST · H 逐字节到达 · I 语义细节 · J fd 无泄漏 · K 优雅退出
+  - ✅ 三处适配：夹具全放 `mktemp -d`（**不往仓库写测试素材**）；v1 的 `body 是 www/index.html` 改成我们自己的标记；70KB 那条继续用「容忍 EPIPE 的 python 客户端」——我们 8KB 就早退，比 v1 的 64KB 更容易撞上那个竞态
+  - ✅ 实测：`make e2e` 与 `make e2e-asan` 都 **61/61**（ASan/UBSan/LSan 全程无报错）
+  - 🐛 **这套测试当场抓出一个真问题**：`GET /` 与 `/sub/` 都返回 404 —— `file.c` 没做「目录请求补 `index.html`」（`CONTRACTS.md` §1 的 200 行要求，而 `file.h` 的注释当时写的是"目录 → 404"，两边打架）。补上后 **11 条断言同时转绿**；「不做目录列表」的语义保留（`/nolist/` 仍 404）
+  - 🔧 顺手修了 `file.c` 一个真 bug：`root_len + url_len` 的**边界检查写在 `memcpy` 之后** → 文档根很长时是栈溢出（现在先检查再拷贝）
+- [x] **T1.7b 三跑体检**（40min）
   - `make check`、`make e2e-asan`（`ASAN_OPTIONS=detect_leaks=1`）、`valgrind --leak-check=full --error-exitcode=1 ./build/debug/mini-httpd`
   - 判据：全绿；valgrind `ERROR SUMMARY: 0 errors` + `All heap blocks were freed`；判「零告警」要 grep `\.c:[0-9]+:[0-9]+: (warning|error)`，别 grep 整个命令（`-Werror=` 会把命令行也算进去）
 - [ ] **T1.7c 复现 M2 的靶子**（30min）
@@ -548,7 +552,7 @@
 | 里程碑 | 计划 | 实际 | 备注（卡在哪、怎么解决） |
 |---|---|---|---|
 | M0 | 8h | ✅ 完成 | 2026-10-06：echo（T0.3）。2026-10-07：echo 重写 `server.c`。2026-10-08：echo 分层（Unity 单元 + e2e）。2026-10-09：shell 分层（`make test` 10 条，修掉 `fgets` 末行与分词末 token 两个真 bug）。2026-10-10/11：pc 信号量版 + `pc/cv` 条件变量版（TSan 走 `setarch -R` 绕 ASLR 假阳性）+ `concurrent_learn`（CSAPP 第 12 章例子）。**T0.2 的根构建旧账并入 M1-T1.0b**（根 `Makefile` 现为 0 字节） |
-| M1 | 原 10h / 重做 15–17h | 🚧 地基 + main.c 已完（T1.0a–c、T1.2e） | 2026-10-06 的 `warmups/httpd/v1`（885 行、`tests/run.sh` 55/55、debug+ASan、valgrind 0 error）**降级为对照物**；2026-10-11 决定在根 `src/` 亲手重做，验收契约与状态码表见 M1 开头。**2026-10-11 阶段 A 完成**：根 `Makefile` 重建（debug/release/asan + test/e2e/check，零告警）、Unity v2.7.0 vendor 进 `tests/unit/unity/`、空套件与缺失 e2e 脚本都会明确失败、README 目录树与磁盘对齐。**2026-10-11 T1.2e 完成**：`src/main.c` 写全（串行 accept + 3 个 IO 包装 + 单一出口 + 错误码映射表 + 有界 lingering close），并用一次性 stub 链接着实跑过验收（见 T1.2e 的实测清单）。**下一步：`src/http.c`（先函数 1 扫描器 → 函数 2 解析 → 响应侧）与 `src/file.c`；`make debug` 现在会链接失败报 undefined reference，那串符号就是待写清单** |
+| M1 | 原 10h / 重做 15–17h | ✅ **完成**（2026-10-14） | 根 `src/` 手写重做完毕，`warmups/httpd/v1` 全程只当对照物。**交付**：`src/{httpd.h,http.h,http.c,file.h,file.c,main.c}`（~1080 行）；`tests/unit/`（Unity：request_line 3 条 + headers 7 条 + smoke 2 条）；`tests/e2e/run.sh`（**61 条**，夹具全在临时目录，不落仓库）。**体检**：严格告警集零告警 · `make e2e` 与 `make e2e-asan` 都 61/61 · valgrind `ERROR SUMMARY: 0 errors` + `All heap blocks were freed` · 50 次请求前后 fd 5→5 · SIGTERM exit 0。**T1.7 收口**：T1.7a e2e 移植 → T1.7b 三跑体检 → T1.7c 慢客户端靶子取证（写进 README「M1 已知缺陷（故意保留）」）→ T1.7d `docs/reports/M1总结（根版）.md` → T1.7e 自查清单 → T1.7f 打基线 `git tag m1-blocking`。**过程中 e2e 抓出 2 个真问题**：① `GET /`、`/sub/` 返回 404（`file.c` 漏了「目录补 index.html」，与 `CONTRACTS.md` §1 打架）→ 补上后 11 条断言同时转绿；② `file.c` 的边界检查写在 `memcpy` 之后（长文档根会栈溢出）→ 改为先检查再拷贝。**遗留**：`test_path_decode.c` 待 §3 定稿（骨架改名 `.pending`）、`test_limits.c` 未建 |
 | M2 | 14h | 未开始 | 落点 = 根 `src/` 原地改造；对照基线 = `git tag m1-blocking`；靶子（慢客户端拖死全服）已在 v1 上复现并留证 |
 | M2+ | 1.5–2 天 | 未开始 | 前置：根 `src/` 的 M2 完成（`m2-epoll`）；任务是 TR.1–TR.9；本机尚未安装 Rust，TR.1 是纯前置 |
 | M3 | 9h | 未开始 | 步骤已展开到 30–40min 粒度 |
@@ -580,16 +584,22 @@
 6. `test_request_line.c` 的 `RUN_TEST()` 少参数、`int main()` 触发 `-Wstrict-prototypes` → 修好；
 7. `Makefile` 的"空套件防护"原来只挡"一个 test 文件都没有"，**挡不住"有文件但 0 用例"** → 现在 Unity 打印 `0 Tests` 就判红。
 
-### 下一步（顺序别反）
+### 下一步（M1 已完成 → 进 M2）
 
-1. 写 **`tests/unit/test_request_line.c` 的用例表**（表驱动；现在那个 `1 Tests` 是零断言空壳，**不算测试**）；
-2. 按 `CONTRACTS.md` §2 实现 `src/http.c`（建议顺序：`http_scan_header_end` → `http_request_parse` → 响应侧三个）；
-3. `src/file.c`（T1.4）；
-4. `tests/e2e/run.sh`（T1.7a）。
-   另外三个用例表文件按语义分组，等对应表写好了再建：`test_headers.c` / `test_limits.c` / `test_path_decode.c`。
+1. **T2.1 连接抽象与缓冲区**：`struct conn { int fd; char rbuf[…]; size_t rlen, roff; char *wbuf; size_t wlen, woff; time_t last_active; }`
+   —— 想清楚「读用 roff/rlen、写用 woff/wlen」以及残余字节怎么 `memmove`；
+2. 依次 **T2.2**（非阻塞 + `EAGAIN` 语义，就是在 `conn_read`/`write_all`/`file_read` 这 3 个函数上动刀）→ **T2.3**（LT 版事件循环）→
+   **T2.4**（切 ET）→ **T2.5**（生命周期：`epoll_ctl(DEL)` 再 `close`）→ **T2.6**（keep-alive）；
+   每一步都跑**同一套** `tests/e2e/run.sh` —— 对照基线就是 `git tag m1-blocking`；
+3. M2 收口：`git tag m2-epoll` + `docs/reports/M2总结（根版）.md`，并把「慢客户端不再拖死全服」补成 e2e 的一条断言
+   （现在是**故意不做**的那条，证据见 README「M1 已知缺陷（故意保留）」）；
+4. 顺手要清的两笔旧账：`tests/unit/test_limits.c`（整体上限 + `file_open_under_root` 的超长 root 用例，钉住本轮修掉的栈溢出隐患）；
+   `docs/rfc/解析待定项.md` §2/§3 定稿后，把 `tests/unit/test_path_decode.c.pending` 改名回 `.c` 并写用例表。
 
 ### 当前红黄灯
 
-- 🔴 `make debug` 仍**链接失败**（`http.c` 的其余函数 + `file.c` 还没实现）—— 那串 `undefined reference` 就是待办清单；
-- 🟢 `make test` / `make test-asan` 绿（但注意上面第 2 条）；
-- 🟡 `tests/bench.sh` 移动后路径全错（T4.0），M4 之前必须修。
+- 🟢 `make debug` / `release` / `asan` 三个产物都能出；
+- 🟢 `make test`（单测 12 条）/ `make test-asan` / `make e2e`（61 条）/ `make e2e-asan` / `make check` **全绿**；
+- 🟢 valgrind `0 errors` + `All heap blocks were freed`；`SIGTERM` → exit 0；50 次请求前后 fd 不变；
+- 🟡 `tests/bench.sh` 移动后路径全错（T4.0），M4 之前必须修；
+- ⏳ `docs/rfc/解析待定项.md` 的 §2（字段语法细节）/ §3（target 与解码规则）还没定稿 —— 定了要**先改契约、再补用例、最后改实现**。

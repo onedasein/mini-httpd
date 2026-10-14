@@ -48,6 +48,7 @@ static size_t strip_trailing_slashes(const char* root) {
 }
 
 file_status file_open_under_root(const char* root_real, const char* url_path, static_file* out) {
+    if (root_real == NULL || root_real[0] != '/') return FILE_BAD_PATH;
     if (out == NULL) return FILE_IO_ERROR;
 
     out->fd = -1;
@@ -59,11 +60,19 @@ file_status file_open_under_root(const char* root_real, const char* url_path, st
     size_t root_len = strip_trailing_slashes(root_real);
     size_t url_len = strlen(url_path);
 
-    // root_real + url_path + NUL
+    // 目录请求补 index.html（CONTRACTS.md §1 的 200 行）。
+    // 只对"以 '/' 结尾"的路径补；补完还是不存在的目录照样 404 —— 这**不是**目录列表，
+    // 「不做目录列表」的语义仍然成立（见 e2e 的 /nolist/ 用例）。
+    const char *tail = (url_len > 0 && url_path[url_len - 1] == '/') ? "index.html" : "";
+    size_t tail_len = strlen(tail);
+
+    // root_real + url_path + tail + NUL
     char joined[FILE_MAX_PATH];
+    if (root_len + url_len + tail_len + 1 > sizeof(joined)) return FILE_BAD_PATH;  // ★ 先检查再拷贝
     memcpy(joined, root_real, root_len);
     memcpy(joined + root_len, url_path, url_len);
-    joined[root_len + url_len] = '\0';
+    memcpy(joined + root_len + url_len, tail, tail_len);
+    joined[root_len + url_len + tail_len] = '\0';
 
     // realpath解开./ .. 和符号链接
     char resolved[FILE_MAX_PATH];
