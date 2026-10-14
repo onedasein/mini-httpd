@@ -136,11 +136,18 @@ static void conn_finish(int cfd) {
 
 static void send_error(int cfd, int status, const char *extra, int head_only) {
     char body[256];
-    int n = snprintf(body, sizeof body,
-                     "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
-                     "<title>%d %s</title></head>\n<body><h1>%d %s</h1><hr>"
-                     "<p>%s</p></body></html>\n",
-                     status, http_status_text(status), status, http_status_text(status), SERVER_VERSION);
+    int n = snprintf(
+        body,
+        sizeof body,
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
+        "<title>%d %s</title></head>\n<body><h1>%d %s</h1><hr>"
+        "<p>%s</p></body></html>\n",
+        status,
+        http_status_text(status),
+        status,
+        http_status_text(status),
+        SERVER_VERSION
+    );
     if (n < 0) n = 0;
     if ((size_t)n >= sizeof body) n = (int)(sizeof body - 1);
 
@@ -152,7 +159,7 @@ static void send_error(int cfd, int status, const char *extra, int head_only) {
     /* 错误页只说状态码，不回显请求路径/绝对路径 —— 不泄漏服务器信息 */
 }
 
-static void send_file(int cfd, const struct static_file *sf, const char *ctype, int head_only) {
+static void send_file(int cfd, const static_file *sf, const char *ctype, int head_only) {
     char head[1024];
     int hn = http_build_response_head(head, sizeof head, 200, ctype, sf->size, NULL);
     if (hn < 0) {
@@ -188,8 +195,10 @@ static void sanitize(char *dst, size_t cap, const char *src, size_t len) {
     dst[i] = '\0';
 }
 
-static void log_request(const char *peer, const char *method, size_t method_len, const char *target, size_t target_len,
-                        int status, long long bytes) {
+static void log_request(
+    const char *peer, const char *method, size_t method_len, const char *target, size_t target_len, int status,
+    long long bytes
+) {
     char m[32];
     char t[256];
 
@@ -227,7 +236,7 @@ static int status_from_parse_err(http_err e) {
     return 400;      /* 解析失败一律算客户端问题：宁可 400，别回 500 把锅甩给自己 */
 }
 
-static int status_from_file_err(enum file_status e) {
+static int status_from_file_err(file_status e) {
     switch (e) {
         case FILE_OK:
             return 200;
@@ -249,7 +258,7 @@ static int status_from_file_err(enum file_status e) {
  *       0 = 收干净了，直接 close 就行。 */
 static int handle_conn(int cfd, const char *peer, char *rbuf) {
     http_request req; /* 注意：http.h 里是匿名 typedef，没有 struct tag —— 别写 struct http_request */
-    struct static_file sf;
+    static_file sf;
     size_t rlen = 0;
     size_t scan = 0;
     size_t head_len = 0;
@@ -258,7 +267,7 @@ static int handle_conn(int cfd, const char *peer, char *rbuf) {
     int status = 500;
     const char *extra = NULL;
     http_err pe;
-    enum file_status fe;
+    file_status fe;
     ssize_t n;
 
     memset(&req, 0, sizeof req);
@@ -297,10 +306,10 @@ static int handle_conn(int cfd, const char *peer, char *rbuf) {
         send_error(cfd, status, extra, req.head_only);
         log_request(peer, req.method, req.method_len, req.target, req.target_len, status, 0);
         drain =
-            (req.content_length >
-             0); /* 第一版不读 body：声明了 body
-                  * 就还有没读的字节；如果客户端声明CL:0或没有CL却仍然多发了字节，我们不drain->close发RST->客户端可能读不到响应。M2的keep-alive会自然修掉。
-                  */
+            (req.content_length > 0
+            ); /* 第一版不读 body：声明了 body
+                * 就还有没读的字节；如果客户端声明CL:0或没有CL却仍然多发了字节，我们不drain->close发RST->客户端可能读不到响应。M2的keep-alive会自然修掉。
+                */
 
         goto done;
     }
@@ -328,11 +337,17 @@ done: /* 单一出口：所有分支都从这里出去，fd/free 不会漏 */
 /* ------------------------------------------------------------------ 启动 */
 
 static void usage(const char *argv0, FILE *out) {
-    fprintf(out,
-            "用法: %s [ip] [port] [www-root]\n"
-            "  默认: %s %d %s\n"
-            "  例:   %s 0.0.0.0 8080 tests/www\n",
-            argv0, DEFAULT_IP, DEFAULT_PORT, DEFAULT_ROOT, argv0);
+    fprintf(
+        out,
+        "用法: %s [ip] [port] [www-root]\n"
+        "  默认: %s %d %s\n"
+        "  例:   %s 0.0.0.0 8080 tests/www\n",
+        argv0,
+        DEFAULT_IP,
+        DEFAULT_PORT,
+        DEFAULT_ROOT,
+        argv0
+    );
 }
 
 /* 解析 argv（三段都可省）。失败只返回错误码，**不 exit** —— 由 main 决定怎么退出。

@@ -13,7 +13,7 @@
  * 归在 file 模块里，因为它只服务「拼路径 + realpath」这一件事。 */
 #define FILE_MAX_PATH 4096
 
-typedef enum file_status {
+typedef enum {
     FILE_OK = 0,       /* 200 */
     FILE_BAD_PATH,     /* 400：路径本身非法（".." 段、反斜杠、不以 '/' 开头） */
     FILE_FORBIDDEN,    /* 403：realpath 之后逃出了文档根，或 EACCES */
@@ -21,10 +21,8 @@ typedef enum file_status {
     FILE_IO_ERROR      /* 500：其它 open/fstat 失败 */
 } file_status;
 
-/* 一次成功解析的结果。fd 已打开，调用方负责 close。
- * 枚举与结构体一律「tag + typedef」：`static_file` 与 `struct static_file`、`file_status` 与
- * `enum file_status` 两种写法都能用（2026-10-13 统一，之前 http.h 是匿名 typedef → `enum http_err` 编不过）。 */
-typedef struct static_file {
+/* 一次成功解析的结果。fd 已打开，调用方负责 close。*/
+typedef struct {
     int fd;                      /* -1 表示未打开（调用方初始化时置 -1） */
     long long size;              /* fstat 出来的大小 —— HTTP 的 Content-Length */
     char real[FILE_MAX_PATH];    /* realpath 结果；Content-Type 靠它的扩展名判断 */
@@ -40,5 +38,4 @@ typedef struct static_file {
  *   ① 逐段拒绝 ".."、拒绝反斜杠 —— 快速失败，且不会误杀 a..b 这种合法文件名；
  *   ② realpath() 解开符号链接后，结果必须仍以 root_real 为前缀，
  *      且边界要么结束、要么正好是 '/'（否则 /var/wwwroot-evil 能骗过纯前缀比较）。 */
-enum file_status file_open_under_root(const char *root_real, const char *url_path,
-                                      struct static_file *out);
+file_status file_open_under_root(const char *root_real, const char *url_path, static_file *out);

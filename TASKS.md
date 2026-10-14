@@ -214,13 +214,13 @@
 
 ### 阶段 D · 静态文件与路径安全（约 3h）
 
-- [ ] **T1.4a MIME 表 + 文件打开**（40min）
+- [x] **T1.4a MIME 表 + 文件打开**（40min）
   - `file_map_path()`：文档根 + URL path → 真实路径；`open` + `fstat`；`Content-Type` 小表（html/css/js/png/jpg/txt/json，未知 → `application/octet-stream`）；**目录补 `index.html`**，没有就 404（不给目录列表）
   - 验收：单测断言扩展名 → MIME 的映射表；e2e `HEAD /index.html` 的 `Content-Type`/`Content-Length` 正确
-- [ ] **T1.4b URL 解码**（30min）
+- [x] **T1.4b URL 解码**（30min）
   - 只解 `%XX`；**`%00` 与解码后出现控制字符一律 400**；不信 `%2e%2e%2f` 这类「编码后的穿越」
   - 验收：`/%2e%2e%2fMakefile` → 400；`/%00` → 400
-- [ ] **T1.4c 路径归一化 + realpath 双保险**（40min｜[手写]）★ 必测项
+- [x] **T1.4c 路径归一化 + realpath 双保险**（40min｜[手写]）★ 必测项
   - 第一层：自己折叠 `.` / `..`（越出根就 400）；第二层：`realpath()` 结果必须仍以文档根 realpath 为前缀，否则 403
   - 坑：`realpath` 在严格 `-std=c11` 下要 `_XOPEN_SOURCE 700` + `<stdlib.h>`，否则隐式声明被 `-Werror` 挡住
   - 验收：`curl --path-as-is 'http://127.0.0.1:8080/../Makefile'` → 400 **且不泄漏内容**；绝对/相对符号链接逃逸 → 403；www 内正常软链 → 200
