@@ -27,7 +27,7 @@
 |---|---|---|---|
 | **M0** | 环境 + C 五阶段热身 | 8h | 周 1–2（环境搭建、C 第 1–5 阶段） |
 | **M1** | 阻塞式 HTTP：**在仓库根 `src/` 亲手重做**（warmups/httpd/v1 降为对照物） | 10h → 15–17h（含根骨架与测试脚手架） | 周 3 上半 |
-| **M2** | epoll 非阻塞 reactor（核心）：**同一份根 `src/` 原地改造**，`git tag m1-blocking` 作对照基线 | 14h | 周 3 下半 – 周 4 |
+| **M2** | epoll 非阻塞 reactor（核心）：**同一份根 `src/` 原地改造**，`git tag m1-blocking` 作对照基线 —— 阶段 A（连接抽象）✅ 2026-10-14 | 14h | 周 3 下半 – 周 4 |
 | **M2+** | Rust 对照实现（非路线图里程碑，见下节） | 1.5–2 天 | —（校准「C→Rust 替代」判断） |
 | **M3** | 健壮性与对抗测试 | 9h | 周 4 末 |
 | **M4** | 压测与第一轮优化 | 10h | 周 5–6 |
@@ -284,24 +284,36 @@
 > 契约不变（argv / `listening on` / `tests/www`），只新增能力：非阻塞、ET、keep-alive。
 > 预计 14h；每个阶段结束时 `make check` 必须仍是绿的（改造期不允许长期红）。
 
-### 阶段 A · 连接抽象（约 3h）
+### 阶段 A · 连接抽象（约 3h）— ✅ 2026-10-14 全部完成（T2.1a–T2.2b）
 
-- [ ] **T2.1a `struct conn` 与缓冲语义**（40min｜[手写]）
-  - `struct conn { int fd; char rbuf[RBUF]; size_t rlen, roff; char *wbuf; size_t wlen, woff; time_t last_active; }`
-  - 想清楚：**读用 `roff/rlen`，写用 `woff/wlen`**；`rlen==roff` 才 compact；写出多少 `woff` 加多少
-  - 验收：头文件里每个字段写一行注释说明「谁在什么时刻改它」
-- [ ] **T2.1b fd → conn 映射**（40min）
-  - 定死一种：`struct conn *conns[FD_MAX]` 按 fd 索引（简单）或 fd 池 + 空闲链表；`accept` 拿不到槽位就 503 后关
-  - 验收：单测用 `socketpair()` 造 fd（不需要真网络）验证「建/取/销毁」不串号；`make test-asan`
-- [ ] **T2.1c 残余字节搬移**（40min）
-  - 一个请求处理完后，缓冲区里可能已经躺着**下一个请求的开头**（pipelining）：`memmove` 到前面，`rlen -= consumed`
-  - 验收：单测喂「两个请求连在一个 `read` 里」，断言第二个请求被正确识别（keep-alive 的前置）
-- [ ] **T2.2a 非阻塞 + IO 包装**（40min）
-  - `fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)`；所有 IO 统一成「`-1 && errno==EAGAIN` → 稍后再来」；`EINTR` **一律重试**（不是错误）
-  - 验收：单测/日志里能看到 `EAGAIN` 是正常路径（返回码区分「读到了」「没有了」「对端关了」「真错了」）
-- [ ] **T2.2b 留下对照组证据**（30min）
-  - 用改造**前**的 `m1-blocking` 二进制再复现一次「慢客户端拖死全服」，把两份证据（改造前卡死 / 改造后不卡）并排放进 README
-  - 验收：README 里有一段带命令的对照记录
+> 收口状态：`make check` 绿 = 16 个单元测试（conn 4 + headers 7 + request_line 3 + smoke 2）+ e2e 61/61，零警告；
+> `make e2e-asan` 61/61；valgrind `0 errors` + `All heap blocks were freed`。
+> 新增模块 `src/conn.{h,c}`（决策与理由见 `docs/adr/003-连接表与conn模块.md`）。
+
+- [x] **T2.1a `struct conn` 与缓冲语义**（40min｜[手写]）— ✅ 2026-10-14 完成
+  - ✅ 落在 `src/conn.h`（不是 `main.c` 里）：因为 T2.1b/T2.1c/T2.2a 的验收都要单元测试，而测试只链接 `LIB_SRC`（不含 `main.c`）
+  - ✅ `struct conn { int fd; char rbuf[RBUF_SIZE]; size_t rlen, roff; char *wbuf; size_t wlen, woff; time_t last_active; }`，**每个字段都写了一行「谁在什么时刻改它」**
+  - ✅ 语义写进头文件顶部：读用 `roff/rlen`、写用 `woff/wlen`；`rlen == roff` 表示读缓冲全消费完
+- [x] **T2.1b fd → conn 映射**（40min）— ✅ 2026-10-14 完成
+  - ✅ 定死：**按 fd 索引的指针数组** `static conn *g_by_fd[CONN_MAX_FD]`（4096，32KB）+ 每连接 `calloc`；`conn_free()` 负责 `close(fd)`（连接对象拥有 fd）
+  - ✅ `accept` 拿不到槽位 → 回 **503**（"Service Unavailable" 已加进 `http_status_text` + `CONTRACTS.md` §1）后关
+  - ✅ 验收：`tests/unit/test_conn.c::test_conn_table` 用 `socketpair()` 造 fd，断言「建/取/销毁不串号、同 fd 建两次被拒、fd 越界返回 NULL、free 之后 `fstat` 报 EBADF」；`make test-asan` 绿
+- [x] **T2.1c 残余字节搬移**（40min）— ✅ 2026-10-14 完成
+  - ✅ `conn_compact(c)`：`roff == 0` 不动；`roff >= rlen` 直接归零（省一次 `memmove`）；否则 `memmove` 到前面并 `rlen -= roff`
+  - ✅ `handle_conn` 的单一出口里调用它（`c->roff = head_len; conn_compact(c);`）——M1 一条连接只处理一个请求，所以这里没有"下一个请求"，但流程与 T2.6 的 keep-alive 一致
+  - ✅ 验收：`test_conn.c::test_conn_compact` 表驱动 5 种情况（不消费/部分消费/全消费/`roff > rlen`/空缓冲），并逐字节比对搬移后的内容
+- [x] **T2.2a 非阻塞 + IO 包装**（40min）— ✅ 2026-10-14 完成
+  - ✅ `conn_set_nonblocking()` + `io_read`/`io_write`/`io_read_file`：**内部重试 EINTR**、`EAGAIN` → `IO_WOULD_BLOCK`、`read == 0` → `IO_CLOSED`、其余 → `IO_ERROR`（四种结果写进 `io_result` 枚举）
+  - ✅ **监听 fd 阶段 A 仍保持阻塞**：串行 accept 还想靠它排队等待；只有**连接 fd** 非阻塞
+  - ✅ 等就绪集中到 `io_wait()`（poll）一处；`main.c` 的 `wait_readable()` 用 200ms 短超时轮询 `g_stop`（**不能无限等**，否则 SIGTERM 正好落在这里就退不出去）
+  - ✅ 验收：`test_conn.c::test_io_read_states` / `test_io_write_states` 断言四种返回 + `io_wait` 的超时/就绪
+- [x] **T2.2b 留下对照组证据**（30min）— ✅ 2026-10-14 完成
+  - ⚠ **2026-10-14 修正任务预期**：阶段 A 之后**仍然会被慢客户端拖死**（串行 accept 没变，`io_wait` 只是把等待点集中起来了），所以"改造后不卡"是 **T2.3/T2.4 的验收**，不是这里的。这里改为留下证据：① `m1-blocking`（纯阻塞 `recv`）卡死；② 阶段 A 后（非阻塞 IO + poll 等待）**仍卡**，但阻塞点从 `recv` 变成 `poll`、IO 层已能区分四种结果
+  - 用改造**前**的 `m1-blocking` 二进制复现「慢客户端拖死全服」，把两份证据并排放进 README；验收：README 里有一段带命令的对照记录
+  - ✅ 已落进 `README.md` 的「M2 阶段 A：改造前后对照（T2.2b）」，含复现命令 + 5 行对照表
+  - ✅ 实测（2026-10-14）：两侧「慢客户端占住时第二个客户端」都是 `000`；`wchan` 从 `wait_woken`（`recv`）变成 `do_sys_poll`（`io_wait` 的 `poll`）；放开慢客户端后两侧都立刻 `200`；`SIGTERM` 两侧都 exit 0
+  - ✅ 同一提交体检：`make e2e-asan` 61/61、valgrind `0 errors` + `All heap blocks were freed`
+  - 📌 对照物构建方式：`git archive m1-blocking | tar -x -C build/tmp/m1base && make -C build/tmp/m1base debug`（落在 gitignore 的 `build/` 里，不进仓库）
 
 ### 阶段 B · 事件循环（约 5h）
 
@@ -553,7 +565,7 @@
 |---|---|---|---|
 | M0 | 8h | ✅ 完成 | 2026-10-06：echo（T0.3）。2026-10-07：echo 重写 `server.c`。2026-10-08：echo 分层（Unity 单元 + e2e）。2026-10-09：shell 分层（`make test` 10 条，修掉 `fgets` 末行与分词末 token 两个真 bug）。2026-10-10/11：pc 信号量版 + `pc/cv` 条件变量版（TSan 走 `setarch -R` 绕 ASLR 假阳性）+ `concurrent_learn`（CSAPP 第 12 章例子）。**T0.2 的根构建旧账并入 M1-T1.0b**（根 `Makefile` 现为 0 字节） |
 | M1 | 原 10h / 重做 15–17h | ✅ **完成**（2026-10-14） | 根 `src/` 手写重做完毕，`warmups/httpd/v1` 全程只当对照物。**交付**：`src/{httpd.h,http.h,http.c,file.h,file.c,main.c}`（~1080 行）；`tests/unit/`（Unity：request_line 3 条 + headers 7 条 + smoke 2 条）；`tests/e2e/run.sh`（**61 条**，夹具全在临时目录，不落仓库）。**体检**：严格告警集零告警 · `make e2e` 与 `make e2e-asan` 都 61/61 · valgrind `ERROR SUMMARY: 0 errors` + `All heap blocks were freed` · 50 次请求前后 fd 5→5 · SIGTERM exit 0。**T1.7 收口**：T1.7a e2e 移植 → T1.7b 三跑体检 → T1.7c 慢客户端靶子取证（写进 README「M1 已知缺陷（故意保留）」）→ T1.7d `docs/reports/M1总结（根版）.md` → T1.7e 自查清单 → T1.7f 打基线 `git tag m1-blocking`。**过程中 e2e 抓出 2 个真问题**：① `GET /`、`/sub/` 返回 404（`file.c` 漏了「目录补 index.html」，与 `CONTRACTS.md` §1 打架）→ 补上后 11 条断言同时转绿；② `file.c` 的边界检查写在 `memcpy` 之后（长文档根会栈溢出）→ 改为先检查再拷贝。**遗留**：`test_path_decode.c` 待 §3 定稿（骨架改名 `.pending`）、`test_limits.c` 未建 |
-| M2 | 14h | 未开始 | 落点 = 根 `src/` 原地改造；对照基线 = `git tag m1-blocking`；靶子（慢客户端拖死全服）已在 v1 上复现并留证 |
+| M2 | 14h | 进行中（**阶段 A ✅ 2026-10-14**） | 落点 = 根 `src/` 原地改造；对照基线 = `git tag m1-blocking`。**阶段 A 交付**：新增 `src/conn.{h,c}`（`struct conn` + fd 索引连接表 + `io_result` 四态 IO + `io_wait`）；`main.c` 去掉本地 `conn` 与 3 个旧 IO 包装，连接 fd 改非阻塞（**监听 fd 阶段 A 仍阻塞**）；`accept` 拿不到槽位 → 503。**体检**：`make check` 绿 = 单测 16 条（conn 4 + headers 7 + request_line 3 + smoke 2）+ e2e 61/61；`make e2e-asan` 61/61；valgrind `0 errors` + `All heap blocks were freed`；零警告。**对照证据（T2.2b）**：两侧「慢客户端占住时别人都是 `000`」，但 `wchan` 从 `wait_woken`（`recv`）变成 `do_sys_poll`（`poll`）——"不卡人"留给 T2.3/T2.4，证据在 README。**决策**：`docs/adr/003-连接表与conn模块.md`。**待办**：`DESIGN.md` §2.2 模块表还没补 `conn.c` 一行（等本人确认） |
 | M2+ | 1.5–2 天 | 未开始 | 前置：根 `src/` 的 M2 完成（`m2-epoll`）；任务是 TR.1–TR.9；本机尚未安装 Rust，TR.1 是纯前置 |
 | M3 | 9h | 未开始 | 步骤已展开到 30–40min 粒度 |
 | M4 | 10h | 未开始 | 先修 `tests/bench.sh`（T4.0）；T4.2 之后的优化步骤等实测热点出来再细化 |
@@ -584,22 +596,22 @@
 6. `test_request_line.c` 的 `RUN_TEST()` 少参数、`int main()` 触发 `-Wstrict-prototypes` → 修好；
 7. `Makefile` 的"空套件防护"原来只挡"一个 test 文件都没有"，**挡不住"有文件但 0 用例"** → 现在 Unity 打印 `0 Tests` 就判红。
 
-### 下一步（M1 已完成 → 进 M2）
+### 下一步（M2 阶段 A 已完成 → 进阶段 B）
 
-1. **T2.1 连接抽象与缓冲区**：`struct conn { int fd; char rbuf[…]; size_t rlen, roff; char *wbuf; size_t wlen, woff; time_t last_active; }`
-   —— 想清楚「读用 roff/rlen、写用 woff/wlen」以及残余字节怎么 `memmove`；
-2. 依次 **T2.2**（非阻塞 + `EAGAIN` 语义，就是在 `conn_read`/`write_all`/`file_read` 这 3 个函数上动刀）→ **T2.3**（LT 版事件循环）→
-   **T2.4**（切 ET）→ **T2.5**（生命周期：`epoll_ctl(DEL)` 再 `close`）→ **T2.6**（keep-alive）；
+1. ~~**T2.1 连接抽象与缓冲区**~~ ✅ 2026-10-14 完成（落在 `src/conn.{h,c}`，见 `docs/adr/003`）；
+   ~~**T2.2 非阻塞 + `EAGAIN` 语义**~~ ✅ 2026-10-14 完成（`io_read`/`io_write`/`io_read_file` + `io_wait`）、T2.2b 对照证据已进 README；
+2. 接着 **T2.3（LT 版事件循环）** → **T2.4**（切 ET）→ **T2.5**（生命周期：`epoll_ctl(DEL)` 再 `close`）→ **T2.6**（keep-alive）；
    每一步都跑**同一套** `tests/e2e/run.sh` —— 对照基线就是 `git tag m1-blocking`；
+   **T2.3 的入口已经准备好**：等待点只剩 `io_wait()` 一处，把它换成 `epoll_wait` 即可（监听 fd 的阻塞也要在这一步去掉）；
 3. M2 收口：`git tag m2-epoll` + `docs/reports/M2总结（根版）.md`，并把「慢客户端不再拖死全服」补成 e2e 的一条断言
-   （现在是**故意不做**的那条，证据见 README「M1 已知缺陷（故意保留）」）；
+   （现在是**故意不做**的那条，证据见 README「M1 已知缺陷（故意保留）」与「M2 阶段 A：改造前后对照」）；
 4. 顺手要清的两笔旧账：`tests/unit/test_limits.c`（整体上限 + `file_open_under_root` 的超长 root 用例，钉住本轮修掉的栈溢出隐患）；
    `docs/rfc/解析待定项.md` §2/§3 定稿后，把 `tests/unit/test_path_decode.c.pending` 改名回 `.c` 并写用例表。
 
 ### 当前红黄灯
 
 - 🟢 `make debug` / `release` / `asan` 三个产物都能出；
-- 🟢 `make test`（单测 12 条）/ `make test-asan` / `make e2e`（61 条）/ `make e2e-asan` / `make check` **全绿**；
+- 🟢 `make test`（单测 **16** 条）/ `make test-asan` / `make e2e`（61 条）/ `make e2e-asan` / `make check` **全绿**；
 - 🟢 valgrind `0 errors` + `All heap blocks were freed`；`SIGTERM` → exit 0；50 次请求前后 fd 不变；
 - 🟡 `tests/bench.sh` 移动后路径全错（T4.0），M4 之前必须修；
 - ⏳ `docs/rfc/解析待定项.md` 的 §2（字段语法细节）/ §3（target 与解码规则）还没定稿 —— 定了要**先改契约、再补用例、最后改实现**。

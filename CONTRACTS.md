@@ -35,6 +35,7 @@
 | 431 | 单行 > `MAX_LINE_LEN`；head 总量 > `MAX_HEADER_LEN`；字段数 > `MAX_HEADERS` | `main.c`（早退）+ `http.c` | RFC 9110 §15.5.23 |
 | 500 | 内部分配失败（`HTTP_ERR_INTERNAL`） | `http.c` → `main.c` | RFC 9110 §15.6.1 |
 | 501 | method为小写`get`; method超长(> `MAX_METHOD_LEN`)| http.c | RFC 9110 §15.6.2 |
+| 503 | **连接表拿不到槽位**（fd ≥ `CONN_MAX_FD`，或连接对象 `calloc` 失败）→ 回 503 后关掉（M2 T2.1b） | `main.c` | RFC 9110 §15.6.4 |
 | 505 | 版本形如 `HTTP/x.y` 但不受支持 | `http.c` | RFC 9110 §15.6.6 |
 | **静默关闭**（一个字节都不回） | 请求没发完就 EOF / 读写出错 | `main.c` | — |
 

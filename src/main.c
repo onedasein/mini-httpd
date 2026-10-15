@@ -23,6 +23,7 @@
  */
 #define _XOPEN_SOURCE 700
 
+#include "conn.h"
 #include "file.h"
 #include "http.h"
 
@@ -56,6 +57,13 @@
 #define STATUS_METHOD_NOT_ALLOWED     405
 #define STATUS_METHOD_NOT_IMPLEMENTED 501
 
+/* 非阻塞下「等一会儿」的轮询粒度（ms）。三处用它：
+ *   ① wait_readable / write_all 等就绪时顺手检查 g_stop（不然 SIGTERM 正好落在 poll 里就退不出去）；
+ *   ② conn_finish 的收尾上界（200ms 内没数据就走）；③ M3 的空闲超时也照这个路子做。 */
+#define WAIT_TICK_MS 200
+
+/* 连接对象（struct conn）与 IO 包装住在 src/conn.h / conn.c —— 抽成模块是因为
+ * T2.1b/T2.1c/T2.2a 的验收都要单元测试，而测试只链接 LIB_SRC（不含 main.c）。 */
 /* ------------------------------------------------------------------ 全局 */
 static const char *g_root_real;              /* 文档根 realpath，启动时算一次 */
 static volatile sig_atomic_t g_stop = 0;     /* 信号 handler 只写它（异步信号安全） */
@@ -66,69 +74,71 @@ static void on_stop(int sig) {
 }
 
 /* ------------------------------------------------------------ 底层 IO 包装
- * M2 的换装点：T2.2 只把这三个函数改成「非阻塞 + EAGAIN 语义」，别的都不动。 */
-static ssize_t conn_read(int fd, void *buf, size_t n) {
-    for (;;) {
-        ssize_t r = recv(fd, buf, n, 0);
-        if (r >= 0) return r;                 /* >0 字节数；0 = 对端关闭（EOF） */
-        if (errno == EINTR) continue;         /* 被信号打断：重试，不是错误 */
-        return -1;                            /* ECONNRESET 等：连接级错误，调用方关掉 */
-    }
-}
+ * 真正的非阻塞语义在 src/conn.c 的 io_read / io_write / io_read_file 里（T2.2a）。
+ * 这里只放这一层的两个**组合器**：写满为止、等可以读。 */
 
-/* 写满为止（write 的返回值可能小于请求长度 —— 大文件必现）。
- * MSG_NOSIGNAL 是第 1 道防线：对端已走时只返回 EPIPE，不发 SIGPIPE。 */
+/* 写满为止（write 会短写 —— 大文件必现）。非阻塞下写不进去就 poll 等 POLLOUT。
+ * MSG_NOSIGNAL 在 io_write 里（第 1 道防线），所以对端已走只会得到 IO_ERROR，不会吃到 SIGPIPE。 */
 static int write_all(int fd, const void *buf, size_t n) {
     const char *p = buf;
     size_t off = 0;
 
     while (off < n) {
-        ssize_t w = send(fd, p + off, n - off, MSG_NOSIGNAL);
-        if (w > 0) {
-            off += (size_t)w;
+        size_t sent = 0;
+        io_result r = io_write(fd, p + off, n - off, &sent);
+
+        if (r == IO_OK) {
+            off += sent;
             continue;
         }
-        if (w < 0 && errno == EINTR) continue;
-        return -1;    /* EPIPE / ECONNRESET 是常态：关这条连接就行，不是致命错误 */
+        if (r == IO_WOULD_BLOCK) {
+            if (io_wait(fd, POLLOUT, WAIT_TICK_MS) < 0 || g_stop) return -1;
+            continue;
+        }
+        return -1; /* IO_CLOSED / IO_ERROR：EPIPE、ECONNRESET 是常态，关这条连接就行 */
     }
     return 0;
 }
 
-/* 普通文件用 read(2)，别用 recv(2)（对普通文件 recv 会 ENOTSOCK） */
-static ssize_t file_read(int fd, void *buf, size_t n) {
-    for (;;) {
-        ssize_t r = read(fd, buf, n);
-        if (r >= 0) return r;
-        if (errno == EINTR) continue;
-        return -1;
+/* 等"可以读了"。返回 0 = 就绪；-1 = 该收摊了（收到信号，或 poll 报错）。
+ * 用 WAIT_TICK_MS 的短超时轮询 g_stop —— **不能无限等**，否则 SIGTERM 正好落在这里就退不出去。
+ * （T2.3 起这个函数退休：等待统一由 epoll_wait 负责，超时用来检查 g_stop / 空闲超时。） */
+static int wait_readable(int fd) {
+    while (!g_stop) {
+        int r = io_wait(fd, POLLIN, WAIT_TICK_MS);
+
+        if (r == 1) return 0; /* 就绪 */
+        if (r < 0) return -1; /* poll 出错（fd 坏了）：收摊 */
     }
+    return -1;
 }
 
 /* 收尾（lingering close）：先 shutdown(SHUT_WR)，再把对端还在路上的字节读掉，最后才 close。
  *
- * 为什么必须做（2026-10-11 实测）：接收队列里还有没读的字节就直接 close，
- * 内核发的是 **RST 而不是 FIN**；而客户端此时往往还在写它那条超大请求 ——
- * 写入失败（EPIPE/ECONNRESET）后，`printf … | nc` 这种测试客户端会直接退出，
- * 连我们已经发出的 431 都读不到（现象：服务端日志记了 431，客户端拿到空响应；
- * 换成会「先读完响应」的客户端就能收到 —— 所以问题在收尾方式，不在响应本身）。
- * 把剩下的字节读干净，close 才会是干净的 FIN。
+ * 为什么必须做（2026-10-11 实测）：接收队列里还有没读的字节就直接 close，内核发的是 **RST 而不是 FIN**；
+ * 客户端此时往往还在写它那条超大请求 —— 写入失败（EPIPE/ECONNRESET）后，`printf … | nc` 这种
+ * 测试客户端会直接退出，连我们已经发出的 431 都读不到。把剩下的字节读干净，close 才是干净的 FIN。
  *
- * 必须有界：一个只连不发、或无限发送的客户端不能把服务器挂在这里。
- * SO_RCVTIMEO 200ms + 最多 1MB 双重上限。 */
+ * 必须有界：200ms 没新数据就走 + 总量最多 1MB。
+ * 注：fd 现在**是非阻塞**的，所以旧的 SO_RCVTIMEO 已经不起作用了 —— 超时改由 io_wait 的 poll 超时承担。 */
 static void conn_finish(int cfd) {
-    struct timeval tv;
     char tmp[4096];
     long long budget = 1024 * 1024;
 
-    (void)shutdown(cfd, SHUT_WR);            /* 明确告诉对端：我不再写了 */
-    tv.tv_sec = 0;
-    tv.tv_usec = 200 * 1000;
-    (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-
+    (void)shutdown(cfd, SHUT_WR); /* 明确告诉对端：我不再写了 */
     while (budget > 0) {
-        ssize_t r = recv(cfd, tmp, sizeof tmp, 0);
-        if (r <= 0) break;                   /* 0 = 对端也关了（干净）；-1 = 超时/出错，走人 */
-        budget -= (long long)r;
+        size_t got = 0;
+        io_result r = io_read(cfd, tmp, sizeof tmp, &got);
+
+        if (r == IO_OK) {
+            budget -= (long long)got;
+            continue;
+        }
+        if (r == IO_WOULD_BLOCK) {
+            if (io_wait(cfd, POLLIN, WAIT_TICK_MS) != 1) break; /* 200ms 没数据：走人 */
+            continue;
+        }
+        break; /* IO_CLOSED（对端也关了，干净）或 IO_ERROR */
     }
 }
 
@@ -173,10 +183,13 @@ static void send_file(int cfd, const static_file *sf, const char *ctype, int hea
     long long left = sf->size;
     while (left > 0) {
         size_t want = (left < (long long)sizeof buf) ? (size_t)left : sizeof buf;
-        ssize_t r = file_read(sf->fd, buf, want);
-        if (r <= 0) break;                     /* 文件被截短/读错：只能断连（头已发出去了） */
-        if (write_all(cfd, buf, (size_t)r) < 0) return;
-        left -= (long long)r;
+        size_t got = 0;
+
+        if (io_read_file(sf->fd, buf, want, &got) != IO_OK || got == 0) {
+            break;                             /* 文件被截短/读错：只能断连（头已发出去了） */
+        }
+        if (write_all(cfd, buf, got) < 0) return;
+        left -= (long long)got;
     }
 }
 
@@ -254,12 +267,11 @@ static int status_from_file_err(file_status e) {
 
 /* -------------------------------------------------------------- 一条连接 */
 
-/* 返回：1 = 接收队列里可能还有没读完的字节 → 调用方**先 conn_finish(cfd) 再 close**；
- *       0 = 收干净了，直接 close 就行。 */
-static int handle_conn(int cfd, const char *peer, char *rbuf) {
+/* 返回：1 = 接收队列里可能还有没读完的字节 → 调用方**先 conn_finish(c->fd) 再 conn_free**；
+ *       0 = 收干净了，直接 conn_free 就行。 */
+static int handle_conn(conn *c, const char *peer) {
     http_request req; /* 注意：http.h 里是匿名 typedef，没有 struct tag —— 别写 struct http_request */
     static_file sf;
-    size_t rlen = 0;
     size_t scan = 0;
     size_t head_len = 0;
     int over_limit = 0;
@@ -268,7 +280,6 @@ static int handle_conn(int cfd, const char *peer, char *rbuf) {
     const char *extra = NULL;
     http_err pe;
     file_status fe;
-    ssize_t n;
 
     memset(&req, 0, sizeof req);
     memset(&sf, 0, sizeof sf);
@@ -277,33 +288,40 @@ static int handle_conn(int cfd, const char *peer, char *rbuf) {
     /* 阶段 1：攒到「空行」为止。
      * 协议知识全在 http_scan_header_end 里，这里只负责「再读一点 / 到上限就别读了」。 */
     for (;;) {
-        if (rlen >= RBUF_SIZE) {
+        size_t got = 0;
+        io_result ir;
+
+        if (c->rlen >= RBUF_SIZE) {
             over_limit = 1;
             break;
         }
-        n = conn_read(cfd, rbuf + rlen, RBUF_SIZE - rlen);
-        if (n <= 0) goto done; /* 没发完就断了/出错了：静默关闭，什么都不回 */
-        rlen += (size_t)n;
-        if (http_scan_header_end(rbuf, rlen, &scan, &head_len)) break;
-        if (rlen >= MAX_HEADER_LEN) {
+        ir = io_read(c->fd, c->rbuf + c->rlen, RBUF_SIZE - c->rlen, &got);
+        if (ir == IO_WOULD_BLOCK) {
+            if (wait_readable(c->fd) != 0) goto done; /* 收到信号 / poll 出错：静默收摊 */
+            continue;
+        }
+        if (ir != IO_OK || got == 0) goto done; /* 没发完就断了/出错了：静默关闭，什么都不回 */
+        c->rlen += got;
+        if (http_scan_header_end(c->rbuf, c->rlen, &scan, &head_len)) break;
+        if (c->rlen >= MAX_HEADER_LEN) {
             over_limit = 1;
             break;
         } /* 提前判 431，别等 rbuf 满 */
     }
 
     if (over_limit) {
-        send_error(cfd, 431, NULL, 0);
+        send_error(c->fd, 431, NULL, 0);
         log_request(peer, NULL, 0, NULL, 0, 431, 0);
         drain = 1; /* 我们是「读一半就走」的：对端大概率还在写 */
         goto done;
     }
 
     /* 阶段 2：解析。失败时解析器保证不留已分配内存，所以这里不需要回滚。 */
-    pe = http_request_parse(rbuf, head_len, &req);
+    pe = http_request_parse(c->rbuf, head_len, &req);
     if (pe != HTTP_OK) {
         status = status_from_parse_err(pe);
         extra = (status == STATUS_METHOD_NOT_ALLOWED) ? "Allow: GET, HEAD\r\n" : NULL;
-        send_error(cfd, status, extra, req.head_only);
+        send_error(c->fd, status, extra, req.head_only);
         log_request(peer, req.method, req.method_len, req.target, req.target_len, status, 0);
         drain =
             (req.content_length > 0
@@ -318,18 +336,24 @@ static int handle_conn(int cfd, const char *peer, char *rbuf) {
     fe = file_open_under_root(g_root_real, req.path, &sf);
     if (fe != FILE_OK) {
         status = status_from_file_err(fe);
-        send_error(cfd, status, NULL, req.head_only);
+        send_error(c->fd, status, NULL, req.head_only);
         log_request(peer, req.method, req.method_len, req.target, req.target_len, status, 0);
         drain = (req.content_length > 0);
         goto done;
     }
 
-    send_file(cfd, &sf, http_content_type(sf.real), req.head_only);
+    send_file(c->fd, &sf, http_content_type(sf.real), req.head_only);
     log_request(peer, req.method, req.method_len, req.target, req.target_len, 200, req.head_only ? 0 : sf.size);
     drain = (req.content_length > 0);
 
 done: /* 单一出口：所有分支都从这里出去，fd/free 不会漏 */
-    if (sf.fd >= 0) close(sf.fd); /* sf.fd 归 handle_conn 管；cfd 归 main 管 */
+    /* T2.1c：把这个请求消费掉（roff 前移到 head_len），再把残余字节挪到前面。
+     * M1 只处理一条连接上的一个请求，所以 compact 之后也没有"下一个请求"；但流程与 M2/T2.6 一致。 */
+    if (head_len > 0 && head_len <= c->rlen) {
+        c->roff = head_len;
+        conn_compact(c);
+    }
+    if (sf.fd >= 0) close(sf.fd); /* sf.fd 归 handle_conn 管；c->fd 归 conn_free 管 */
     http_request_free(&req);
     return drain;
 }
@@ -414,7 +438,7 @@ static int make_listener(const char *ip, int port) {
     }
     return fd;
 }
-
+// 打印日志
 static void describe_peer(int fd, char *out, size_t cap) {
     struct sockaddr_in sa;
     socklen_t sl = sizeof sa;
@@ -440,7 +464,6 @@ int main(int argc, char **argv) {
     struct stat st;
     struct sigaction sa;
     int lfd;
-    char *rbuf;
     char peer[64];
 
     /* 1) argv */
@@ -490,15 +513,12 @@ int main(int argc, char **argv) {
     printf("listening on %s:%d  (www-root=%s)\n", ip, port, g_root_real);
     fflush(stdout);
 
-    /* 5) 读缓冲：串行模型的一个好处就是可以复用一份（M2 才改成每连接一份 struct conn） */
-    rbuf = malloc(RBUF_SIZE);
-    if (rbuf == NULL) {
-        fprintf(stderr, "malloc(%d) 失败\n", (int)RBUF_SIZE);
-        close(lfd);
-        return 1;
-    }
+    /* 5) 读缓冲现在**每连接一份**（内嵌在 `struct conn` 里），不再有全局 rbuf */
 
-    /* 6) 串行 accept 循环：一次一条连接，处理完才收下一条（M2 的对照组） */
+    /* 6) 串行 accept 循环（M2 的对照组）。阶段 A 起的变化：
+     *    · 连接 fd 是**非阻塞**的：IO 层能区分「读到了 / 没有了 / 对端关了 / 真错了」；
+     *    · 等就绪集中到 wait_readable() / io_wait() 一处 —— T2.3 换成 epoll_wait 就成了事件循环；
+     *    · 监听 fd 仍保持阻塞：accept 还想在这里排队等待（T2.3 才改）。 */
     while (!g_stop) {
         int cfd = accept(lfd, NULL, NULL);
 
@@ -519,15 +539,27 @@ int main(int argc, char **argv) {
         }
 
         describe_peer(cfd, peer, sizeof peer);
-        if (handle_conn(cfd, peer, rbuf) != 0) {
-            conn_finish(cfd); /* 收尾：别让对端还在写的字节把响应顶掉（见 conn_finish） */
+        if (conn_set_nonblocking(cfd) < 0) {
+            fprintf(stderr, "fcntl(O_NONBLOCK): %s\n", strerror(errno));
+            close(cfd);
+            continue;
         }
-        close(cfd); /* cfd 的生命周期只归 main 管 */
+        conn *c = conn_alloc(cfd);
+        if (c == NULL) {
+            /* T2.1b：拿不到连接槽位（fd 超过表容量 / 内存不足）→ 回 503 再关 */
+            log_request(peer, NULL, 0, NULL, 0, 503, 0);
+            send_error(cfd, 503, NULL, 0);
+            close(cfd);
+            continue;
+        }
+        if (handle_conn(c, peer) != 0) {
+            conn_finish(c->fd); /* 收尾：别让对端还在写的字节把响应顶掉（见 conn_finish） */
+        }
+        conn_free(c); /* 关 fd + 归还槽位：fd 的生命周期归 conn 管 */
     }
 
     printf("shutdown: 收到信号，关闭监听 fd 并正常退出\n");
     fflush(stdout);
     close(lfd);
-    free(rbuf);
     return 0;
 }

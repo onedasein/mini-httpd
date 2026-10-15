@@ -52,6 +52,7 @@ mini-httpd/
 │   ├── httpd.h       # 上限常量与版本串（数字的唯一真源）
 │   ├── http.h/.c     # 协议：字节 ↔ 请求结构、响应头拼装
 │   ├── file.h/.c     # URL 路径 → 根下真实文件（含路径安全）
+│   ├── conn.h/.c     # M2 阶段 A：连接对象 + fd 索引连接表 + io_result 四态 IO（见 docs/adr/003）
 │   └── main.c        # I/O 与生命周期：收连接 / 读写 / 关 fd / 信号 / argv
 ├── tests/
 │   ├── www/          # 被测的静态文件根目录（argv 第三段，默认就指这里）
@@ -97,6 +98,34 @@ curl -m 2 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18097/    # 另一�
 | 慢客户端退出之后 | 下一次 `curl` → `200` | 串行模型下立刻恢复 |
 
 → M2 的验收就是把这个实验**反过来**：慢客户端占住时，其他客户端仍能拿到 200（T2.3 的 LT 版就要做到，T2.4 再切 ET）。
+
+## M2 阶段 A：改造前后对照（T2.2b）
+
+M2 的第一刀只做两件事：**连接 fd 全改非阻塞** + **把 IO 收敛成 `io_result` 四态**。
+它**故意不动** accept 结构 —— 监听 fd 仍是阻塞的，主循环仍是一次一条。
+所以这一刀**治不好**上面那个"被拖死"，这是预期内的：不卡人是 T2.3/T2.4 的验收。
+阶段 A 的产出是**等待点只剩一个**：`io_wait()`（内部 `poll`）。T2.3 把那一个点换成 `epoll_wait`，慢客户端才不再拖死别人。
+
+取证方法（2026-10-14，两侧同一夹具、同一手法；`m1base` 落在 gitignore 的 `build/` 下，不污染仓库）：
+
+```bash
+git archive m1-blocking | tar -x -C build/tmp/m1base && make -C build/tmp/m1base debug
+# 对两侧各跑一遍：起服务 → nc 连上不发数据 → 第二个客户端 curl -m 2 → 看 wchan → 放开慢客户端 → 再 curl
+```
+
+| 观测 | `m1-blocking`（纯阻塞 `recv`） | 阶段 A 后（非阻塞 + `poll` 等待） |
+|---|---|---|
+| 慢客户端占住时的第二个客户端 | `000`（超时） | `000`（**仍然超时**，符合预期） |
+| 服务端卡在哪（`/proc/<pid>/wchan`） | `wait_woken`（停在 `recv()`） | `do_sys_poll`（停在 `io_wait()` 的 `poll`） |
+| 慢客户端放开之后 | 立刻 `200` | 立刻 `200` |
+| IO 层可分辨的返回 | 「字节数 / -1」两态 | `IO_OK` / `IO_WOULD_BLOCK` / `IO_CLOSED` / `IO_ERROR` 四态 |
+| `SIGTERM` 退出码 | `0` | `0`（`wait_readable` 每 200ms 看一次 `g_stop`，不会僵在 `poll` 里） |
+
+**怎么读这张表**：第 1 行没变，说明阶段 A 没顺手治串行（也不该治）；第 2 行的 `wchan` 从 `recv` 变成 `poll`，
+才是这一刀真正的形状 —— 等待从「散落在各处的阻塞系统调用」变成了「一个显式的等待点」，
+而"等什么、等到没有"由 `io_result` 表达。T2.3 只需替换那一个点。
+
+体检（同一提交）：`make e2e-asan` → 61/61；新代码走 valgrind → `ERROR SUMMARY: 0 errors` + `All heap blocks were freed`。
 
 ## WSL2 注意事项
 

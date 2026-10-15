@@ -370,6 +370,8 @@ const char *http_status_text(int status) {
             return "Internal Server Error";
         case 501:
             return "Not Implemented";
+        case 503:
+            return "Service Unavailable"; /* M2 T2.1b：连接表拿不到槽位时回它 */
         case 505:
             return "HTTP Version Not Supported";
         default:
