@@ -118,9 +118,24 @@ const char *http_status_text(int status);
  * path 必须是 NUL 结尾的（传 req->path 或 static_file.real，别传裸切片）。 */
 const char *http_content_type(const char *path);
 
-/* 一次性拼出响应头：状态行 + Server/Content-Type/Content-Length/Connection: close + extra + 空行。
- *   extra — 可塞额外一行，如 "Allow: GET, HEAD\r\n"；没有就传 NULL
+/* 这条请求处理完，连接该关还是该留？（M2/T2.6，规则真源见 CONTRACTS.md §1b）
+ *   HTTP/1.1：默认留，除非 `Connection: close`
+ *   HTTP/1.0：默认关，除非 `Connection: keep-alive`
+ * 返回：1 = 处理完就关（wants close）；0 = 可以留着接下一个请求。
+ * 为什么放在协议层：判断要读 `version` 与 `Connection` 的值 —— 都是协议知识，
+ * 漏到 `main.c` 里去比字符串就等于分层破了（`main.c` 不认识 header 语义）。 */
+int http_request_wants_close(const http_request *req);
+
+/* 一次性拼出响应头：状态行 + Server/Content-Type/Content-Length/Connection + extra + 空行。
+ *   keep_alive — 非 0 → `Connection: keep-alive`，否则 `Connection: close`
+ *   extra      — 可塞额外一行，如 "Allow: GET, HEAD\r\n"；没有就传 NULL
  * 返回：写入的字节数；缓冲区放不下返回 -1（调用方回 500，别把截断的头发出去）。 */
 int http_build_response_head(
-    char *out, size_t cap, int status, const char *ctype, long long body_len, const char *extra
+    char *out,
+    size_t cap,
+    int status,
+    const char *ctype,
+    long long body_len,
+    int keep_alive,
+    const char *extra
 );

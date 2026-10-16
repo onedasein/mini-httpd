@@ -43,6 +43,32 @@
 
 ---
 
+## 1b. 连接语义（keep-alive 真源，M2/T2.6 起）
+
+| 请求 | 响应里的 `Connection:` | 处理完连接怎么办 |
+|---|---|---|
+| HTTP/1.1，没写 `Connection` | `keep-alive` | **留着**接下一个请求 |
+| HTTP/1.1，`Connection: close` | `close` | 响应写完就关 |
+| HTTP/1.0，没写 `Connection` | `close` | 响应写完就关（1.0 默认短连接） |
+| HTTP/1.0，`Connection: keep-alive` | `keep-alive` | 留着 |
+
+**例外（强制关，即使客户端想留）**：
+- 请求声明了 `Content-Length > 0`（第一版不读 body）→ 没被消费的 body 会被当成下一个请求，只能关；
+- 解析失败的那些分支（400/405/413/414/431/501/505）→ 我们无法确定请求边界，一律关；
+- 收尾（DRAIN）与连接表收缩等异常路径。
+
+**实现位置**：判断在 `http.c`（`http_request_wants_close()`，协议知识不许漏进 `main.c`），
+落地在 `main.c`（`serve_request` 里定 `conn.keep_alive`，写响应时交给 `http_build_response_head`）。
+
+**已知简化**：`Connection` 的值按**整体**比较，不解析逗号列表（`close, foo` 这种会被当成没写）。
+两个方向的误判都无害：1.1 少关一次，客户端自己会关；1.0 多关一次，客户端重连就是。
+出处：RFC 9110 §9.3（`Connection`）、RFC 9112 §9.3、RFC 7230 §6.3。
+
+> **M1 的旧语义是「一律 `Connection: close`」**（当时是刻意简化，e2e 有一条断言钉着它）。
+> T2.6 起改成上表；e2e 那条断言随之拆成「显式 close / 默认 keep-alive」两条，`v1` 的其余断言不动。
+
+---
+
 ## 2. 函数契约清单
 
 每个函数必须能回答 6 件事：**前置条件 / 输入 / 输出 / 失败 / 所有权 / 是否修改入参**。
@@ -55,8 +81,30 @@
 | `http_find_header` | http.c | `req` 已解析 | `req,name`（NUL 结尾） | `const http_header*` | `NULL` | 借用，不分配 |
 | `http_status_text` | http.c | — | `status` | 状态文本 | 表里没有 → 兜底串（如 `"Error"`） | 静态串 |
 | `http_content_type` | http.c | `path` NUL 结尾 | `path` | MIME 文本 | 不认识的扩展名 → `application/octet-stream` | 静态串 |
-| `http_build_response_head` | http.c | `cap > 0` | `out,cap,status,ctype,body_len,extra` | 写入字节数 | 放不下 → `-1`（**绝不许发截断的头**） | 不分配 |
+| `http_build_response_head` | http.c | `cap > 0` | `out,cap,status,ctype,body_len,keep_alive,extra` | 写入字节数 | 放不下 → `-1`（**绝不许发截断的头**） | 不分配 |
+| `http_request_wants_close` | http.c | `req` 已解析 | `req`（**只读**） | `1` = 处理完就关 | 无（纯判断，见 §1b） | 不分配 |
 | `file_open_under_root` | file.c | `root_real` 是启动时算好的文档根 realpath | `root_real,url_path,out*` | `FILE_OK` + `out` 填好（fd 已打开） | `enum file_status`；**不留已打开的 fd** | 成功时 fd 由调用方 `close` |
+
+### M2/T2.3b 新增（连接状态机与 IO；细节写在 `src/conn.h`，决策见 `docs/adr/004`）
+
+| 函数 | 模块 | 前置 | 输入 | 输出 | 失败 | 所有权 |
+|---|---|---|---|---|---|---|
+| `conn_set_wbuf` | conn.c | `c` 有效 | `buf,len` | `wbuf` 装好、`woff=0` | `-1` = 内存不足（调用方转 `CONN_CLOSE`） | **拷贝**进去；旧的 `wbuf` 被释放 |
+| `conn_next_step` | conn.c | — | `c`（**只读**） | 下一步（`conn_step`） | 无（纯函数） | 不改任何状态 |
+| `conn_step_events` | conn.c | — | `step` | `EPOLLIN` / `EPOLLOUT` / `0` | 无 | 无 |
+| `io_sendfile` | conn.c | `out_fd` 是 socket、`in_fd` 是普通文件 | `off*`、`count` | `IO_OK` + `*n`；`*off` 由内核推进 | `IO_WOULD_BLOCK` / `IO_CLOSED`（文件提前到头）/ `IO_ERROR` | 不动所有权 |
+| `conn_next_fd` | conn.c | — | `fd`（`-1` = 从头开始） | 下一个已占用 fd；没有 → `-1` | 无 | 无（遍历途中可安全 `close_conn`） |
+| `conn_now_ms` | conn.c | — | — | 单调毫秒（`CLOCK_MONOTONIC`） | 时钟失败 → `0` | 无 |
+| `conn_reset_for_next_request` | conn.c | 当前请求的响应已写完 | `c` | `wbuf`/`file_fd`/`rscan`/`keep_alive` 清干净，回到 `CONN_READ_REQ` | 无 | **关掉 `file_fd`、释放 `wbuf`**（每请求一份的资源） |
+
+**状态机不变式（T2.3b + T2.6）**：一条连接恒处于 `CONN_READ_REQ / CONN_WRITE / CONN_DRAIN / CONN_CLOSE` 之一；
+"下一步干什么、该关注什么事件"**只能**由 `conn_next_step()` + `conn_step_events()` 推出来
+（**不许另外存一份 interest 副本** —— 存的是"当前注册的掩码"，只用于"没变就不 `MOD`"，方向仍由这两个函数决定）。
+`CONN_WRITE` 内部顺序固定：先把 `wbuf` 写完 → 再 `sendfile` 文件体 → 然后**四选一**：
+`drain_left > 0` → `DRAIN`（先 `shutdown(SHUT_WR)`，200ms 截止）；`keep_alive` → `NEXT_REQ`（清状态接下一个）；
+否则 → `CLOSE`。连接对象**拥有** `fd` 与 `file_fd`（`conn_free` 一起关）。
+**ET 口径（T2.4）**：每一步都要**做到 `IO_WOULD_BLOCK` 为止**才算"做不动了"，
+否则边沿触发不会再通知 → 连接会挂住。注册 `EPOLLOUT` 只在真的写不动之后（写完立刻摘掉）。
 
 **借用 vs 拥有**（最容易出事的一条）：`http.h` 里除 `path` 之外**所有字段都是借用**（指向读缓冲的切片，
 **非 NUL 结尾**）：比较必须"先比长度、再 `strncasecmp`/`memcmp`"，**不许 `strcmp`**。
@@ -98,8 +146,12 @@ grep -rn '\bexit(\|\babort(' src/ | grep -v main.c    # 必须为空：只有 ma
 grep -rn 'strcpy\|strcat\|sprintf' src/               # 必须为空：只用 snprintf + 长度检查
 grep -rn 'fd\|sockaddr\|errno' src/http.h             # 必须为空：协议层不碰 IO
 grep -n '#include "http.h"' src/file.h                # 必须为空：file 模块不认识协议
+grep -n 'io_wait\|poll(' src/main.c                   # 必须为空：T2.3b 起等待统一交给 epoll_wait
+grep -n 'close(' src/main.c   # 只允许：reply_then_close / accept 与启动的失败兜底 / file fd 的退还 / 退出路径
 ```
 
 - 写一律 `send(..., MSG_NOSIGNAL)` + 进程级 `SIGPIPE → SIG_IGN`（两道防线）。
 - 被测函数**失败返回错误码、不 `exit()`**；失败路径**不留已分配内存、不留已打开的 fd**。
 - 上限**先检查再解析**（`MAX_*` 都在 `src/httpd.h`）。
+- 事件循环里**不许阻塞着等某一条连接**：一次事件只做一段 IO，剩下的交给下一次 `epoll_wait`。
+- 关连接只走 `close_conn()`：**先 `epoll_ctl(DEL)` 再 `conn_free`**（顺序反了就是 fd 复用踩已释放对象）。

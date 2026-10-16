@@ -312,6 +312,71 @@ static void test_headers_onlycr(void) {
     }
 }
 
+/* ==================== 连接该关还是该留（T2.6） ====================
+ * 规则真源：CONTRACTS.md §1b（1.1 默认留、1.0 默认关、显式 Connection 覆盖默认）。
+ * 这条判断放在 http.c 而不是 main.c，就是因为"读 version 与 Connection 的值"是协议知识。 */
+static void test_headers_connection(void) {
+    // clang-format off
+    struct { const char *label, *head; int want_close; } cases[] = {
+        { "1.1 不写 Connection           → 留", "GET / HTTP/1.1\r\nHost: x\r\n\r\n",                       0 },
+        { "1.1 Connection: close         → 关", "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",  1 },
+        { "1.1 大小写混杂 cOnNeCtIoN: CLOSE → 关", "GET / HTTP/1.1\r\nHost: x\r\ncOnNeCtIoN: CLOSE\r\n\r\n", 1 },
+        { "1.1 Connection: keep-alive    → 留", "GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n", 0 },
+        { "1.0 不写 Connection           → 关", "GET / HTTP/1.0\r\n\r\n",                                  1 },
+        { "1.0 Connection: keep-alive    → 留", "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n",       0 },
+        { "1.0 Connection: close         → 关", "GET / HTTP/1.0\r\nConnection: close\r\n\r\n",            1 },
+        { "值不是 close/keep-alive → 按版本默认", "GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\nX: 1\r\n\r\n", 0 },
+    };
+    // clang-format on
+
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        http_request req;
+        http_err got;
+        int want_close;
+
+        memset(&req, 0, sizeof req);
+        got = http_request_parse(cases[i].head, strlen(cases[i].head), &req);
+        if (got != HTTP_OK) {
+            http_request_free(&req);
+            TEST_FAIL_MESSAGE(cases[i].label); /* 这条用例的前提是解析要成功 */
+        }
+        want_close = http_request_wants_close(&req); /* ★ 先取值，再 free（free 会清零 req） */
+        http_request_free(&req);
+        if (want_close != cases[i].want_close) {
+            char msg[160];
+
+            snprintf(
+                msg,
+                sizeof msg,
+                "%s：想要 wants_close=%d，实际 %d",
+                cases[i].label,
+                cases[i].want_close,
+                want_close
+            );
+            TEST_FAIL_MESSAGE(msg);
+        }
+    }
+}
+
+/* ==================== 响应头里的 Connection（T2.6） ==================== */
+static void test_headers_response_connection(void) {
+    char head[512];
+    int n;
+
+    n = http_build_response_head(head, sizeof head, 200, "text/plain", 3, 1, NULL);
+    TEST_ASSERT_TRUE_MESSAGE(n > 0, "拼 keep-alive 响应头");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(head, "Connection: keep-alive\r\n"), "keep_alive=1 → keep-alive");
+
+    n = http_build_response_head(head, sizeof head, 404, "text/html", 0, 0, NULL);
+    TEST_ASSERT_TRUE_MESSAGE(n > 0, "拼 close 响应头");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(head, "Connection: close\r\n"), "keep_alive=0 → close");
+
+    n = http_build_response_head(head, sizeof head, 405, "text/html", 0, 0, "Allow: GET, HEAD\r\n");
+    TEST_ASSERT_TRUE_MESSAGE(n > 0, "拼带 extra 的响应头");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(head, "Allow: GET, HEAD\r\n"), "extra 那一行还在");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(head, "\r\n\r\n"), "头以空行结束");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_headers_case);
@@ -321,6 +386,8 @@ int main(void) {
     RUN_TEST(test_headers_empty);
     RUN_TEST(test_headers_empty_pre_colon);
     RUN_TEST(test_headers_onlycr);
+    RUN_TEST(test_headers_connection);
+    RUN_TEST(test_headers_response_connection);
     return UNITY_END();
 }
 

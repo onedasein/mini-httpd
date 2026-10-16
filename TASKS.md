@@ -27,7 +27,7 @@
 |---|---|---|---|
 | **M0** | 环境 + C 五阶段热身 | 8h | 周 1–2（环境搭建、C 第 1–5 阶段） |
 | **M1** | 阻塞式 HTTP：**在仓库根 `src/` 亲手重做**（warmups/httpd/v1 降为对照物） | 10h → 15–17h（含根骨架与测试脚手架） | 周 3 上半 |
-| **M2** | epoll 非阻塞 reactor（核心）：**同一份根 `src/` 原地改造**，`git tag m1-blocking` 作对照基线 —— 阶段 A（连接抽象）✅ 2026-10-14 | 14h | 周 3 下半 – 周 4 |
+| **M2** | epoll 非阻塞 reactor（核心）：**同一份根 `src/` 原地改造**，`git tag m1-blocking` 作对照基线 —— ✅ **2026-10-14 三个阶段全完成**（连接抽象 → LT → ET + keep-alive）；只剩 `git tag m2-epoll` 等提交 | 14h | 周 3 下半 – 周 4 |
 | **M2+** | Rust 对照实现（非路线图里程碑，见下节） | 1.5–2 天 | —（校准「C→Rust 替代」判断） |
 | **M3** | 健壮性与对抗测试 | 9h | 周 4 末 |
 | **M4** | 压测与第一轮优化 | 10h | 周 5–6 |
@@ -315,53 +315,107 @@
   - ✅ 同一提交体检：`make e2e-asan` 61/61、valgrind `0 errors` + `All heap blocks were freed`
   - 📌 对照物构建方式：`git archive m1-blocking | tar -x -C build/tmp/m1base && make -C build/tmp/m1base debug`（落在 gitignore 的 `build/` 里，不进仓库）
 
-### 阶段 B · 事件循环（约 5h）
+### 阶段 B · 事件循环（约 5h）— ✅ 2026-10-14 全部完成（T2.3 LT → T2.4 ET）
 
-- [ ] **T2.3a epoll 骨架**（30min）
+- [x] **T2.3a epoll 骨架**（30min）— ✅ 2026-10-14 完成（本人手写，复核通过）
   - `epoll_create1(0)` → `epoll_ctl(ADD, listener, EPOLLIN)` → `epoll_wait` 循环；先只处理 listener，连接读一次就关
   - 验收：`strace -c ./build/debug/mini-httpd` 里能看到 `epoll_wait`
-- [ ] **T2.3b LT 版接通**（40min）
+  - ✅ 实测：主循环确实是 `epoll_wait`（`strace -c`：80 个请求 → 614 次 `epoll_wait`，**0 次 `poll`**）
+  - ⚠ 骨架阶段的连接处理**仍是同步的**（listener 事件里直接调 `handle_conn`，一口气跑到底）
+    → 所以那时"仍然阻塞"，这正是 T2.3b 要拆掉的东西（原因见 `docs/adr/004` 的对照表）
+- [x] **T2.3b LT 版接通**（40min）— ✅ 2026-10-14 完成
   - 水平触发下把 accept/read/write 接进来：一次事件处理一条连接的一段数据即可，不追求性能，只求「能跑」
   - 验收：`curl` 200；`make check` 绿
-- [ ] **T2.3c LT 就已经不卡了**（20min）
+  - ✅ 落地：`main.c` 换成真事件循环 —— 连接 fd 注册进同一个 epoll（`on_accept`/`on_conn_event`）；
+    `handle_conn` 拆成 `step_read_req` / `step_write` / `step_drain`（一次事件一段 IO）；
+    响应装进 `conn.wbuf` 再靠 `EPOLLOUT` 写；文件体走 `sendfile`；收尾改成事件驱动的 `DRAIN` + 200ms 截止
+  - ✅ 抽出可单测的纯逻辑：`conn_next_step` / `conn_step_events` / `conn_set_wbuf` / `conn_next_fd` / `io_sendfile` / `conn_now_ms`
+    （`test_conn.c` 从 4 个测试函数加到 7 个）
+  - ✅ 验收：`make check` 绿 = 单测 **19** 条 + e2e **61** 条；`make e2e-asan` 61/61；零告警；
+    valgrind `0 errors` + `All heap blocks were freed`；空闲 2 秒 **0 jiffy** CPU（没空转）
+  - 📌 决策与取舍：`docs/adr/004-事件循环与连接状态机.md`；契约：`CONTRACTS.md` §2「状态机不变式」
+- [x] **T2.3c LT 就已经不卡了**（20min）— ✅ 2026-10-14 实测通过
   - 慢客户端连上不发数据时，其它客户端应照常 200（对照 T2.2b 的证据）
-- [ ] **T2.4a listener 切 ET**（40min）
+  - ✅ 实测：慢客户端占住时第二个客户端 **200**（`wchan`：`wait_woken` → `do_sys_poll` → **`do_epoll_wait`**）；
+    20 条慢 loris 同时挂着，正常请求 **10/10** 成功，收尾后 fd 回落到基线
+  - 📌 还差的收尾动作：把这条**写进 `tests/e2e/run.sh`**（M1 时是"故意不做"的那条断言）——留给 M2 收口一起做
+- [x] **T2.4a listener 切 ET**（40min）— ✅ 2026-10-14 完成
   - listener 加 `EPOLLET`；**`accept` 必须循环到 `EAGAIN`**，否则连接堆在队列里（`ss -tln` 的 `Recv-Q` 会一直涨）
   - 验收：`ss -tln 'sport = :8080'` 压测后 `Recv-Q` 回到 0
-- [ ] **T2.4b 连接 fd 切 ET**（40min）
+  - ✅ `on_accept()` 改成 `for(;;)` 收到 `EAGAIN`；`EMFILE` 时**不 sleep**（睡了更没机会回收 fd = 自锁），
+    只记日志停手，靠下一次连接带来的边沿自愈
+  - ✅ 实测：`wrk -t2 -c100 -d10s` 之后 `ss -tln` 的 `Recv-Q = 0`
+- [x] **T2.4b 连接 fd 切 ET**（40min）— ✅ 2026-10-14 完成
   - conn fd 加 `EPOLLET`；**`read` 必须循环到 `EAGAIN`**（ET 只在状态变化时通知一次）
   - 验收：大 body / 逐字节到达的 e2e 用例仍绿
-- [ ] **T2.4c 写不完注册 EPOLLOUT**（40min）
+  - ✅ `step_read_req`/`step_write`/`step_drain` 都改成"做到 `IO_WOULD_BLOCK` 为止"，返回值统一成
+    "这一步搬了多少字节"（0 = 做不动了）；`conn_next_step`/`conn_step_events` 一行没动
+  - ✅ 新驱动 `conn_pump()`：一次事件把"读请求 → 写响应 → 接下一个请求"连着走完
+  - ✅ 验收：e2e 的 10MB 大文件、逐字节到达、裸 LF 全绿（69/69）
+- [x] **T2.4c 写不完注册 EPOLLOUT**（40min）— ✅ 2026-10-14 完成
   - 只在「写不完」时 `epoll_ctl(MOD, EPOLLIN|EPOLLOUT|EPOLLET)`，**写完立刻摘掉**；`EPOLLOUT` 常驻 = 事件循环空转 CPU 100%
   - 验收：背压 e2e（客户端 `SO_RCVBUF=4096`）能收满 10MB；压测时 `top` 里 CPU 不空转
-- [ ] **T2.4d ET 验收**（30min）
+  - ✅ 做法：写是**先试**的（pump 里直接 `send`/`sendfile`），拿到 `IO_WOULD_BLOCK` 才 `MOD` 挂 `EPOLLOUT`
+    —— 那一瞬间"写不动 → 又写得动"才是真的状态变化，边沿必来
+  - ✅ `arm_interest()` 只在掩码变化时才 `epoll_ctl(MOD)`（存 `conn.interest` 只用于比较，不是第二份真相）
+  - ✅ 实测：背压 10MB 收满；空闲 2 秒 **0 jiffy** CPU
+- [x] **T2.4d ET 验收**（30min）— ✅ 2026-10-14 完成
   - `wrk -t2 -c100 -d10s http://127.0.0.1:8080/index.html` → Non-2xx = 0 且无超时；顺手记一张 `strace -c`
   - 验收：数据与 `strace -c` 表一起进 `docs/bench/`（M4 的起点）
+  - ✅ 实测：**48,338 req/s**、延迟 2.04ms、0 非 2xx、0 超时；`Recv-Q = 0`
+  - ✅ 全在 `docs/bench/M2-ET验收.md`（含 `strace -c` 表与"这张表怎么读"）
+  - ✅ 顺带抓到并修掉 **`TCP_NODELAY`**：不设 2,233 req/s / 44.50ms，设了 **48,338 / 2.04ms**（18 倍，ADR-005）
 
-### 阶段 C · 生命周期与 keep-alive（约 4.5h）
+### 阶段 C · 生命周期与 keep-alive（约 4.5h）— ✅ 2026-10-14 全部完成
 
-- [ ] **T2.5a 关闭路径封装**（40min）
+- [x] **T2.5a 关闭路径封装**（40min）— ✅ 2026-10-14 完成
   - `close_conn()`：**先 `epoll_ctl(DEL)` 再 `close`**（顺序反了就是 use-after-free）；同时清 `conns[fd]` 槽位、释放 `wbuf`
   - 验收：ASan 下反复连断 100 次无报错
-- [ ] **T2.5b 对端半关闭**（40min）
+  - ✅ `close_conn()` 是**唯一**关连接的口（`conn_free()` 只做"归还槽位 + 关 fd + 关 file_fd + free wbuf"）
+  - ✅ 实测：ASan 版连断 100 次 → 报错 0、服务端存活、fd 回落到 6；valgrind `0 errors` + 全释放
+- [x] **T2.5b 对端半关闭**（40min）— ✅ 2026-10-14 完成
   - `read` 返回 0 / `EPOLLRDHUP` → 收完就关；`EPOLLHUP`/`EPOLLERR` 也要处理，别只认 `EPOLLIN`
   - 验收：`curl` 正常请求后连接被服务端关闭（`Connection: close` 语义）；半关闭（`shutdown(SHUT_WR)`）场景不卡死
-- [ ] **T2.5c errno 分类**（40min）
+  - ✅ **故意不注册 `EPOLLRDHUP`**：FIN 一定让 socket 变成"可读的 EOF"→ `EPOLLIN` 照来；
+    写侧半关闭也不该打断我们发响应（`printf … | nc -N` 正是这种客户端）
+  - ✅ `EPOLLHUP/ERR` 不当"立刻关"：照常推进，以 `read`/`write` 返回值为权威；
+    只有"整趟零进展 + 有硬错误"才关（否则 HUP 反复上报 = 空转 100% CPU）
+  - ✅ 验收：e2e 的 `nc -N` 半关闭、`Connection: close` 真关两条断言；显式 close 之后客户端能读到 EOF
+- [x] **T2.5c errno 分类**（40min）— ✅ 2026-10-14 完成
   - `EPIPE` / `ECONNRESET` 是正常现象 → 关连接继续；`EINTR` 重试；只对真错误打印并清理
   - 验收：压测中途 `kill -9` 一批客户端，服务端不退出、日志无致命错误
-- [ ] **T2.5d 压测 + 无泄漏**（40min）
+  - ✅ 分类全在 `conn.c` 的 `io_*` 里：`EINTR` 内部重试、`EAGAIN/EWOULDBLOCK` → `IO_WOULD_BLOCK`、
+    `EPIPE/ECONNRESET` → `IO_ERROR`（= 关连接，不打印）；只有 accept 类错误才 stderr
+  - ✅ 实测：20 个客户端传 20MB 中途被 `kill -9` → 服务端存活、再请求 200、fd 46 → 6、日志致命错误 0
+- [x] **T2.5d 压测 + 无泄漏**（40min）— ✅ 2026-10-14 完成
   - ASan 版跑 `wrk -t4 -c200 -d30s`（全程不崩）；压测前后 `ls /proc/<pid>/fd | wc -l` 一致
   - 验收：两套数据都记进 `docs/`（一条命令 + 输出）
-- [ ] **T2.6a keep-alive 解析循环**（40min）
+  - ✅ 实测：133,975 请求、不崩、fd **6 → 6**、ASan/LSan 报错 0、`SIGTERM` exit 0
+  - ✅ 数据与命令在 `docs/bench/M2-ET验收.md` §3/§5
+- [x] **T2.6a keep-alive 解析循环**（40min）— ✅ 2026-10-14 完成
   - 同一条连接上循环「解析 → 处理 → 消费缓冲 → 处理残余」，`EAGAIN` 才回到 `epoll_wait`
   - 验收：`curl -v http://127.0.0.1:8080/a http://127.0.0.1:8080/b` 出现 `Re-using existing connection`
-- [ ] **T2.6b 何时主动关**（20min）：`Connection: close` 与 HTTP/1.0（无 `Connection: keep-alive`）→ 处理完就关；1.1 默认保持
-- [ ] **T2.6c e2e 增补 keep-alive 组**（30min）
+  - ✅ 落地：`CONN_STEP_NEXT_REQ` 一步 + `conn_reset_for_next_request()`（关 `file_fd`、放 `wbuf`、
+    清 `rscan`/`drain`/`keep_alive`、回 `CONN_READ_REQ`）；`step_read_req` **先扫缓冲再 read**，
+    所以流水线（两个请求一次发来）也能连着处理
+  - ✅ 实测：`curl -v a b` → `Re-using existing connection`；同连接连发 3 个 200；流水线两条响应
+- [x] **T2.6b 何时主动关**（20min）— ✅ 2026-10-14 完成：`Connection: close` 与 HTTP/1.0（无 `Connection: keep-alive`）→ 处理完就关；1.1 默认保持
+  - ✅ 规则写进 `CONTRACTS.md` **§1b**（唯一真源）；判断在 `http.c::http_request_wants_close()`
+    （协议知识不许漏进 `main.c`）；三个例外：声明了 body 没消费、解析失败的分支、异常路径
+  - ✅ 语义简化记进 `docs/rfc/解析待定项.md` #13/#14/#15（按整体比较 `Connection` 值等）
+- [x] **T2.6c e2e 增补 keep-alive 组**（30min）— ✅ 2026-10-14 完成
   - 新增断言：同连接两个请求都 200、`Connection: close` 后连接真的关、1.0 默认关；**v1 那 55 条一条都不许退化成 fail**
   - 验收：`make check` 绿，条数 ≥ 之前 + 新增
-- [ ] **T2.6d 收口**（40min｜[手写]）
+  - ✅ 61 → **69** 条：新增 **L 组**（keep-alive 6 条：连发 3 个 200、close 真关、1.0 默认关、
+    1.0 keep-alive、流水线两条响应）+ **M 组**（慢客户端 2 条，即 T2.3c 的靶子反过来）
+  - ✅ `Connection: close` 那条老断言拆成「显式 close」+「默认 keep-alive」两条；
+    逐字节到达那条显式加 `Connection: close`（它原来靠"一律关连接"收尾）—— 两处都记在脚本头部注释里
+  - ✅ v1 的 55 条语义断言一条没放宽；`make e2e` 与 `make e2e-asan` 都 69/69
+- [x] **T2.6d 收口**（40min｜[手写]）— ✅ 文档完成，**tag 等提交后打**
   - 写 `docs/05-M2总结（根版）.md`：与 `m1-blocking` 的 diff 里哪些是「必要的状态机改造」、哪些是「epoll 特有」；`git tag m2-epoll`
   - 验收：tag + 文档 + 差异清单都在，M2+ 才有参照物
+  - ✅ 文档落在 `docs/reports/M2总结（根版）.md`（仓库实际的报告目录；§2 就是那张「必要 vs epoll 特有」分类表）
+  - ⏳ **`git tag m2-epoll` 没打**：tag 要打在提交上，而提交是他的动作。命令：`git add -A && git commit -m "M2: epoll ET + keep-alive" && git tag -a m2-epoll -m "..."`
 
 ---
 
@@ -565,7 +619,7 @@
 |---|---|---|---|
 | M0 | 8h | ✅ 完成 | 2026-10-06：echo（T0.3）。2026-10-07：echo 重写 `server.c`。2026-10-08：echo 分层（Unity 单元 + e2e）。2026-10-09：shell 分层（`make test` 10 条，修掉 `fgets` 末行与分词末 token 两个真 bug）。2026-10-10/11：pc 信号量版 + `pc/cv` 条件变量版（TSan 走 `setarch -R` 绕 ASLR 假阳性）+ `concurrent_learn`（CSAPP 第 12 章例子）。**T0.2 的根构建旧账并入 M1-T1.0b**（根 `Makefile` 现为 0 字节） |
 | M1 | 原 10h / 重做 15–17h | ✅ **完成**（2026-10-14） | 根 `src/` 手写重做完毕，`warmups/httpd/v1` 全程只当对照物。**交付**：`src/{httpd.h,http.h,http.c,file.h,file.c,main.c}`（~1080 行）；`tests/unit/`（Unity：request_line 3 条 + headers 7 条 + smoke 2 条）；`tests/e2e/run.sh`（**61 条**，夹具全在临时目录，不落仓库）。**体检**：严格告警集零告警 · `make e2e` 与 `make e2e-asan` 都 61/61 · valgrind `ERROR SUMMARY: 0 errors` + `All heap blocks were freed` · 50 次请求前后 fd 5→5 · SIGTERM exit 0。**T1.7 收口**：T1.7a e2e 移植 → T1.7b 三跑体检 → T1.7c 慢客户端靶子取证（写进 README「M1 已知缺陷（故意保留）」）→ T1.7d `docs/reports/M1总结（根版）.md` → T1.7e 自查清单 → T1.7f 打基线 `git tag m1-blocking`。**过程中 e2e 抓出 2 个真问题**：① `GET /`、`/sub/` 返回 404（`file.c` 漏了「目录补 index.html」，与 `CONTRACTS.md` §1 打架）→ 补上后 11 条断言同时转绿；② `file.c` 的边界检查写在 `memcpy` 之后（长文档根会栈溢出）→ 改为先检查再拷贝。**遗留**：`test_path_decode.c` 待 §3 定稿（骨架改名 `.pending`）、`test_limits.c` 未建 |
-| M2 | 14h | 进行中（**阶段 A ✅ 2026-10-14**） | 落点 = 根 `src/` 原地改造；对照基线 = `git tag m1-blocking`。**阶段 A 交付**：新增 `src/conn.{h,c}`（`struct conn` + fd 索引连接表 + `io_result` 四态 IO + `io_wait`）；`main.c` 去掉本地 `conn` 与 3 个旧 IO 包装，连接 fd 改非阻塞（**监听 fd 阶段 A 仍阻塞**）；`accept` 拿不到槽位 → 503。**体检**：`make check` 绿 = 单测 16 条（conn 4 + headers 7 + request_line 3 + smoke 2）+ e2e 61/61；`make e2e-asan` 61/61；valgrind `0 errors` + `All heap blocks were freed`；零警告。**对照证据（T2.2b）**：两侧「慢客户端占住时别人都是 `000`」，但 `wchan` 从 `wait_woken`（`recv`）变成 `do_sys_poll`（`poll`）——"不卡人"留给 T2.3/T2.4，证据在 README。**决策**：`docs/adr/003-连接表与conn模块.md`。**待办**：`DESIGN.md` §2.2 模块表还没补 `conn.c` 一行（等本人确认） |
+| M2 | 14h | ✅ **完成**（2026-10-14） | 三个阶段：**A 连接抽象**（`src/conn.{h,c}`：`struct conn` + fd 索引连接表 + `io_result` 四态 IO）→ **B 事件循环**（T2.3 LT 治好慢客户端拖死；T2.4 切 ET：accept/read/write 都做到 `EAGAIN`、`EPOLLOUT` 只在写不动后挂上）→ **C 生命周期与 keep-alive**（`close_conn` 先 `DEL` 再 `free`、半关闭与 HUP/ERR 处理、`Connection` 语义进 §1b、同连接连发/流水线都通）。**体检**：单测 22 条 + e2e **69** 条全绿、`make e2e-asan` 69/69、valgrind 0 errors + 全释放、零告警；`wrk -t2 -c100 -d10s` **48,338 req/s** / 延迟 2.04ms / `Recv-Q = 0`；ASan 版 `wrk -t4 -c200 -d30s` 133,975 请求不崩、fd 6 → 6。**过程中抓到的真问题**：① 非阻塞不等于不阻塞（谁有数据只有内核知道）；② ET 半路撒手 = 静默挂住；③ `HUP/ERR` 不能当立刻关；④ **`TCP_NODELAY` 值 18 倍**（2233 → 48338 req/s）；⑤ keep-alive 的边界是「请求边界确不确定」而非「能不能保持」。**决策**：`docs/adr/004`（LT）、`005`（ET + keep-alive + NODELAY）。**数据**：`docs/bench/M2-ET验收.md`。**总结**：`docs/reports/M2总结（根版）.md`。**遗留**：keep-alive 空闲超时（M3/T3.1）、`realpath` 每请求一次（M4 路径缓存）、`git tag m2-epoll` 等提交 |
 | M2+ | 1.5–2 天 | 未开始 | 前置：根 `src/` 的 M2 完成（`m2-epoll`）；任务是 TR.1–TR.9；本机尚未安装 Rust，TR.1 是纯前置 |
 | M3 | 9h | 未开始 | 步骤已展开到 30–40min 粒度 |
 | M4 | 10h | 未开始 | 先修 `tests/bench.sh`（T4.0）；T4.2 之后的优化步骤等实测热点出来再细化 |
@@ -596,22 +650,26 @@
 6. `test_request_line.c` 的 `RUN_TEST()` 少参数、`int main()` 触发 `-Wstrict-prototypes` → 修好；
 7. `Makefile` 的"空套件防护"原来只挡"一个 test 文件都没有"，**挡不住"有文件但 0 用例"** → 现在 Unity 打印 `0 Tests` 就判红。
 
-### 下一步（M2 阶段 A 已完成 → 进阶段 B）
+### 下一步（M2 已完成 → 进 M2+ / M3）
 
-1. ~~**T2.1 连接抽象与缓冲区**~~ ✅ 2026-10-14 完成（落在 `src/conn.{h,c}`，见 `docs/adr/003`）；
-   ~~**T2.2 非阻塞 + `EAGAIN` 语义**~~ ✅ 2026-10-14 完成（`io_read`/`io_write`/`io_read_file` + `io_wait`）、T2.2b 对照证据已进 README；
-2. 接着 **T2.3（LT 版事件循环）** → **T2.4**（切 ET）→ **T2.5**（生命周期：`epoll_ctl(DEL)` 再 `close`）→ **T2.6**（keep-alive）；
-   每一步都跑**同一套** `tests/e2e/run.sh` —— 对照基线就是 `git tag m1-blocking`；
-   **T2.3 的入口已经准备好**：等待点只剩 `io_wait()` 一处，把它换成 `epoll_wait` 即可（监听 fd 的阻塞也要在这一步去掉）；
-3. M2 收口：`git tag m2-epoll` + `docs/reports/M2总结（根版）.md`，并把「慢客户端不再拖死全服」补成 e2e 的一条断言
-   （现在是**故意不做**的那条，证据见 README「M1 已知缺陷（故意保留）」与「M2 阶段 A：改造前后对照」）；
-4. 顺手要清的两笔旧账：`tests/unit/test_limits.c`（整体上限 + `file_open_under_root` 的超长 root 用例，钉住本轮修掉的栈溢出隐患）；
-   `docs/rfc/解析待定项.md` §2/§3 定稿后，把 `tests/unit/test_path_decode.c.pending` 改名回 `.c` 并写用例表。
+1. **先打基线**：`git add -A && git commit -m "M2: epoll ET + keep-alive" && git tag -a m2-epoll`——
+   M2+ 的 Rust 对照必须以它为参照物（T2.6d 的 tag 是唯一没做完的验收动作）；
+2. **M2+（Rust 对照，TR.1–TR.9）**：前置是 TR.1 装工具链走镜像（`mirrors.tuna.tsinghua.edu.cn/rustup`），
+   接口契约是同样的 `argv`（`<ip> <port> <www_root>`）；对照物是 `warmups/httpd/v1/tests/run.sh` **55/55 且不许改脚本**；
+3. **M3 健壮性（9h）**：第一件就是 **keep-alive 空闲超时**（现在挂着的空闲连接会一直占 fd；
+   `conn.last_active` 与 `sweep_deadlines()` 都已经就位，差的是"扫到就关"这条规则 + 一张 e2e）；
+   然后慢速 loris、只发一半就 RST、内存不涨等；
+4. **M4 压测与优化（10h）**：`docs/bench/M2-ET验收.md` 的 `strace -c` 已经指明了第一个优化点 ——
+   `readlink`（`realpath`）占 37.8% 的时间，每请求一次；先修 `tests/bench.sh`（T4.0）再压；
+5. 顺手要清的旧账：`tests/unit/test_limits.c`（未建）、`docs/rfc/解析待定项.md` §3 定稿后把
+   `test_path_decode.c.pending` 改名回 `.c`；`DESIGN.md` §2.2 模块表还缺 `conn.c` 一行（设计真源是他的，等他拍板）。
 
 ### 当前红黄灯
 
 - 🟢 `make debug` / `release` / `asan` 三个产物都能出；
-- 🟢 `make test`（单测 **16** 条）/ `make test-asan` / `make e2e`（61 条）/ `make e2e-asan` / `make check` **全绿**；
+- 🟢 `make test`（单测 **22** 条）/ `make test-asan` / `make e2e`（**69** 条）/ `make e2e-asan` / `make check` **全绿**；
 - 🟢 valgrind `0 errors` + `All heap blocks were freed`；`SIGTERM` → exit 0；50 次请求前后 fd 不变；
+- 🟢 M2 完成：`wrk -t2 -c100 -d10s` **48,338 req/s** / 延迟 2.04ms / `Recv-Q = 0`（`docs/bench/M2-ET验收.md`）；
+- 🟡 **keep-alive 没有空闲超时**：空闲连接会一直占 fd（M3/T3.1 的第一件事）；
 - 🟡 `tests/bench.sh` 移动后路径全错（T4.0），M4 之前必须修；
 - ⏳ `docs/rfc/解析待定项.md` 的 §2（字段语法细节）/ §3（target 与解码规则）还没定稿 —— 定了要**先改契约、再补用例、最后改实现**。

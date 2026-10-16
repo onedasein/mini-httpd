@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/e2e/run.sh — M1（阻塞版）端到端验收
+# tests/e2e/run.sh — 端到端验收（M1 阻塞版 → M2 epoll ET 版，同一套脚本）
 #
 #   bash tests/e2e/run.sh                        # 测 build/debug/mini-httpd
 #   bash tests/e2e/run.sh ./build/asan/mini-httpd
@@ -7,9 +7,14 @@
 #
 # 断言从哪来（每条都要能指出出处）：
 #   · 状态码与语义 → CONTRACTS.md §1（200/400/403/404/405/413/414/431/505）
+#   · 连接语义     → CONTRACTS.md §1b（M2/T2.6 起：1.1 默认 keep-alive、1.0 默认关）
 #   · 语法决定     → docs/rfc/解析待定项.md（裸 LF 宽容、HTTP/1→400、小写 get→501…）、docs/adr/002
 #   · **改脚本 = 改题目**：本文件是 warmups/httpd/v1/tests/run.sh 那 55 条的移植版，
 #     语义断言一条都不许放宽；只有夹具位置（改用临时目录）与 v1 强绑定的字面量做了适配。
+#     **M2/T2.6 的两处改动都记在上面 §1b 里**（不是"放宽"）：
+#       ① `Connection: close` 那条断言拆成「显式 close」+「默认 keep-alive」两条；
+#       ② 逐字节到达那条**显式加** `Connection: close` —— 它本来靠"服务端一律关连接"收尾，
+#          现在 1.1 默认保持，不加就会读到超时（题目没变，变的是服务端语义）。
 #
 # 两条纪律：
 #   1. 期望值**写死**，不许拿"另一条命令"当期望（那是自证）。
@@ -81,7 +86,7 @@ rawall(){ printf "$1" | timeout "$TMO" nc -N 127.0.0.1 "$PORT"; }
 srv_start || { echo "服务端起不来" >&2; exit 2; }
 echo "被测程序: $BIN"
 echo "文档根   : $WWW（夹具随脚本结束一起删）"
-echo "注意：M1 故意串行 —— 一个慢客户端能拖死全服（这是 T1.7c 的靶子，不是回归项）"
+echo "注意：M2 起不再串行 —— 慢客户端拖不死别人（M 组就是这条，M1 的对照证据在 README）"
 echo
 
 echo "---- A. 请求行 + 响应（T1.1/T1.2）----"
@@ -236,7 +241,8 @@ chk "  RST 之后服务端仍能正常服务" "$(code "$U/index.html")" "200"
 echo "---- H. 短读：请求逐字节到达（T1.3d）----"
 bytewise=$(python3 - "$PORT" <<'PY'
 import socket, sys, time
-req = b'GET / HTTP/1.1\r\nHost: x\r\n\r\n'
+# 显式 Connection: close：这条用例靠"响应发完服务端就关"收尾（M2 起 1.1 默认保持，不给就会读到超时）
+req = b'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'
 s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=15)
 for ch in req:
     s.sendall(bytes([ch]))                # 每次只发 1 字节，强制服务端多次 read
@@ -263,11 +269,133 @@ chk "PUT → 405" "$(code -X PUT "$U/")" "405"
 chk "  405 带 Allow: GET, HEAD" "$(curl -s -I -X PUT --max-time "$TMO" "$U/" | tr -d '\r' | grep -ci '^allow: get, head')" "1"
 chk "DELETE → 405" "$(code -X DELETE "$U/")" "405"
 chk "HTTP/1.0 也能服务（无 Host）" "$(raw 'GET / HTTP/1.0\r\n\r\n' | head -1)" "HTTP/1.1 200 OK"
-chk "  响应头里有 Connection: close" "$(hdr "$U/" | grep -ci '^connection: close')" "1"
+chk "  显式 Connection: close → 响应头也是 close" \
+    "$(curl -s -I -H 'Connection: close' --max-time "$TMO" "$U/" | tr -d '\r' | grep -ci '^connection: close')" "1"
+chk "  默认（1.1 不带 Connection）→ keep-alive" \
+    "$(hdr "$U/" | grep -ci '^connection: keep-alive')" "1"
 chk "Connection: close 请求" "$(raw 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')" "HTTP/1.1 200 OK"
 chk "裸 LF 行尾也被宽容接受" \
     "$(printf 'GET / HTTP/1.1\nHost: x\n\n' | timeout "$TMO" nc -N 127.0.0.1 "$PORT" | head -1 | tr -d '\r')" \
     "HTTP/1.1 200 OK"
+
+echo "---- L. keep-alive / 连接语义（T2.6，规则见 CONTRACTS.md §1b）----"
+# 一条连接上连发多个请求，必须各自把 body 读干净（按 Content-Length），否则下一条响应的解析会被 body 串位
+cat > "$work/h1.py" <<'PYEOF'
+def read_response(s):
+    """读一条完整响应（头 + 按 Content-Length 收完 body），返回 (状态码, 头字典)。"""
+    buf = b''
+    while b'\r\n\r\n' not in buf:
+        c = s.recv(4096)
+        if not c:
+            return None, {}
+        buf += c
+    head, body = buf.split(b'\r\n\r\n', 1)
+    fields = {}
+    for line in head.split(b'\r\n')[1:]:
+        if b':' in line:
+            k, v = line.split(b':', 1)
+            fields[k.strip().lower().decode()] = v.strip().decode()
+    clen = int(fields.get('content-length', '0'))
+    while len(body) < clen:
+        c = s.recv(4096)
+        if not c:
+            break
+        body += c
+    return head.split(b' ')[1].decode(), fields
+PYEOF
+
+kareuse=$(python3 - "$PORT" "$work" <<'PY'
+import socket, sys
+sys.path.insert(0, sys.argv[2]); import h1
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=10)
+codes = []
+for _ in range(3):                        # 同一条连接上连发 3 个请求
+    s.sendall(b'GET / HTTP/1.1\r\nHost: x\r\n\r\n')
+    code, _ = h1.read_response(s)
+    codes.append(code or '---')
+s.close()
+print(' '.join(codes))
+PY
+)
+chk "同一连接上连发 3 个请求都 200" "$kareuse" "200 200 200"
+
+kaclose=$(python3 - "$PORT" "$work" <<'PY'
+import socket, sys
+sys.path.insert(0, sys.argv[2]); import h1
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=10)
+s.sendall(b'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+code, fields = h1.read_response(s)
+s.settimeout(3)
+try:                                      # 服务端必须真的关：读完 body 之后应当收到 EOF
+    tail = s.recv(100)
+except Exception:
+    tail = b'x'
+if code == '200' and fields.get('connection') == 'close' and tail == b'':
+    print('closed')
+else:
+    print('kept-alive(%s,%s,%r)' % (code, fields.get('connection'), tail))
+PY
+)
+chk "Connection: close 的请求：头是 close 且连接被关" "$kaclose" "closed"
+
+ka10=$(python3 - "$PORT" "$work" <<'PY'
+import socket, sys
+sys.path.insert(0, sys.argv[2]); import h1
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=10)
+s.sendall(b'GET / HTTP/1.0\r\n\r\n')      # 1.0 且没要 keep-alive → 处理完就关
+code, fields = h1.read_response(s)
+s.settimeout(3)
+try:
+    tail = s.recv(100)
+except Exception:
+    tail = b'x'
+print('closed' if (fields.get('connection') == 'close' and tail == b'') else 'kept-alive')
+PY
+)
+chk "HTTP/1.0 默认短连接（处理完就关）" "$ka10" "closed"
+
+ka10k=$(python3 - "$PORT" "$work" <<'PY'
+import socket, sys
+sys.path.insert(0, sys.argv[2]); import h1
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=10)
+codes = []
+for _ in range(2):                        # 1.0 + 显式要 keep-alive → 也能保持
+    s.sendall(b'GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n')
+    code, _ = h1.read_response(s)
+    codes.append(code or '---')
+s.close()
+print(' '.join(codes))
+PY
+)
+chk "HTTP/1.0 + Connection: keep-alive 也保持" "$ka10k" "200 200"
+
+kapipeline=$(python3 - "$PORT" <<'PY'
+import socket, sys, time
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=10)
+# 流水线：两个请求**一次**发出去，服务端要在一次事件里连着处理（残余字节不能丢）
+s.sendall(b'GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /style.css HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+time.sleep(0.3)
+d = b''
+while True:
+    c = s.recv(65536)
+    if not c:
+        break
+    d += c
+print(d.count(b'HTTP/1.1 200'))
+PY
+)
+chk "流水线两个请求 → 两条响应" "$kapipeline" "2"
+
+echo "---- M. 慢客户端拖不死别人（T2.3c 的靶子反过来；ET 版的核心验收）----"
+( timeout 8 nc 127.0.0.1 "$PORT" >/dev/null 2>&1 ) &
+SLOW=$!
+sleep 0.3
+chk "慢客户端连上不发数据时，别的客户端仍 200" "$(code "$U/")" "200"
+chk "  再来 5 次也全是 200" \
+    "$(for _ in 1 2 3 4 5; do code "$U/index.html"; printf ' '; done | tr -s ' ' | sed 's/ $//')" \
+    "200 200 200 200 200"
+kill "$SLOW" 2>/dev/null; wait "$SLOW" 2>/dev/null
+sleep 0.3                                 # 让服务端把那条连接的 EOF 处理掉（J 组要数 fd）
 
 echo "---- J. 收尾：服务端还活着 / 没有泄漏 fd（T3.4 的前身）----"
 fds_after=$fds_before

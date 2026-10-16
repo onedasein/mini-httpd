@@ -412,12 +412,27 @@ const char *http_content_type(const char *path) {
     return "application/octet-stream"; /* 不认识就给二进制流，绝不猜 */
 }
 
-/* 一次性拼出响应头：状态行 + Server/Content-Type/Content-Length/Connection: close + extra + 空行。
+/* 这条请求处理完，连接该关还是该留？（规则真源：CONTRACTS.md §1b）
+ * 值是**切片**（非 NUL 结尾），所以只能 slice_eq_ci；按整体比较，不解析逗号列表 ——
+ * 两个方向的误判都无害（1.1 少关一次由客户端自己关；1.0 多关一次客户端重连就是）。 */
+int http_request_wants_close(const http_request *req) {
+    const http_header *ch = http_find_header(req, "Connection");
+    int http10 = slice_eq(req->version, req->version_len, "HTTP/1.0");
+
+    if (ch != NULL) {
+        if (slice_eq_ci(ch->value, ch->value_len, "close")) return 1;
+        if (slice_eq_ci(ch->value, ch->value_len, "keep-alive")) return 0;
+    }
+    return http10; /* 1.0 默认短连接；1.1 默认保持 */
+}
+
+/* 一次性拼出响应头：状态行 + Server/Content-Type/Content-Length/Connection + extra + 空行。
+ *   keep_alive — 非 0 → "Connection: keep-alive"，否则 "Connection: close"
  *   extra — 可塞额外一行（如 "Allow: GET, HEAD\r\n"），没有就传 NULL
  * 返回写入的字节数；放不下返回 -1 —— 调用方据此回 500，**绝不要发截断的头**。
  * 坑：snprintf 的返回值是"本该写入的长度"，所以要拿它跟 cap 比，而不是看实际写了多少。 */
 int http_build_response_head(char *out, size_t cap, int status, const char *ctype, long long body_len,
-                             const char *extra) {
+                             int keep_alive, const char *extra) {
     int n;
 
     if (ctype == NULL) ctype = "application/octet-stream"; /* 防御：上游漏给类型时别打出 "(null)" */
@@ -426,10 +441,11 @@ int http_build_response_head(char *out, size_t cap, int status, const char *ctyp
                  "Server: %s\r\n"
                  "Content-Type: %s\r\n"
                  "Content-Length: %lld\r\n"
-                 "Connection: close\r\n"
+                 "Connection: %s\r\n"
                  "%s"
                  "\r\n",
-                 status, http_status_text(status), SERVER_VERSION, ctype, body_len, extra != NULL ? extra : "");
+                 status, http_status_text(status), SERVER_VERSION, ctype, body_len,
+                 keep_alive ? "keep-alive" : "close", extra != NULL ? extra : "");
     if (n < 0 || (size_t)n >= cap) return -1;
     return n;
 }
